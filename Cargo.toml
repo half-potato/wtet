@@ -1,0 +1,17 @@
+[package]
+name = "gdel3d_wgpu"
+version = "0.1.0"
+edition = "2021"
+description = "GPU-accelerated 3D Delaunay triangulation using wgpu compute shaders"
+
+[dependencies]
+wgpu = "24"
+bytemuck = { version = "1", features = ["derive"] }
+glam = "0.29"
+pollster = "0.4"
+log = "0.4"
+futures-channel = "0.3"
+
+[dev-dependencies]
+env_logger = "0.11"
+rand = "0.8"
