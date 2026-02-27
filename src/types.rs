@@ -1,6 +1,14 @@
 use bytemuck::{Pod, Zeroable};
 
 // ---------------------------------------------------------------------------
+// Constants
+// ---------------------------------------------------------------------------
+
+/// Mean vertex degree for block-based allocation.
+/// Each vertex gets a block of this many tet slots in free_arr.
+pub const MEAN_VERTEX_DEGREE: u32 = 64;
+
+// ---------------------------------------------------------------------------
 // Configuration
 // ---------------------------------------------------------------------------
 

@@ -82,7 +82,13 @@ pub async fn run(
 
         log::debug!("Inserting {} points", num_inserted);
 
-        // 5. Split
+        // 5a. Mark split (for concurrent split detection)
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_mark_split(&mut encoder, queue, num_inserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // 5b. Split
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split(&mut encoder, queue, num_inserted);
         queue.submit(Some(encoder.finish()));

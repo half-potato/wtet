@@ -2,7 +2,7 @@ pub mod buffers;
 pub mod pipelines;
 pub mod dispatch;
 
-use crate::types::*;
+use crate::types::{*, MEAN_VERTEX_DEGREE};
 use buffers::GpuBuffers;
 use pipelines::Pipelines;
 
@@ -24,8 +24,12 @@ impl GpuState {
         _config: &GDelConfig,
     ) -> Self {
         let num_points = points.len() as u32;
-        // Allocate ~10x points for tets (typical Delaunay tet count is ~6.5x)
-        let max_tets = (num_points * 10).max(64);
+        // For block-based allocation, need enough tets to fill all vertex blocks
+        // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots
+        let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE;
+        // Also consider typical Delaunay tet count (~6.5x points)
+        let typical_tets = num_points * 10;
+        let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
 
         // Build point buffer: N real points + 4 super-tet vertices
         let mut gpu_points: Vec<GpuPoint> = points

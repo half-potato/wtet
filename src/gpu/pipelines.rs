@@ -22,6 +22,16 @@ pub struct Pipelines {
     pub pick_bind_group: wgpu::BindGroup,
     pub pick_params: wgpu::Buffer,
 
+    // Pipeline: update vert free list (allocates tet blocks for inserting vertices)
+    pub update_vert_free_pipeline: wgpu::ComputePipeline,
+    pub update_vert_free_bind_group: wgpu::BindGroup,
+    pub update_vert_free_params: wgpu::Buffer,
+
+    // Pipeline: mark split (marks tets being split for concurrent detection)
+    pub mark_split_pipeline: wgpu::ComputePipeline,
+    pub mark_split_bind_group: wgpu::BindGroup,
+    pub mark_split_params: wgpu::Buffer,
+
     // Pipeline: split tetra
     pub split_pipeline: wgpu::ComputePipeline,
     pub split_bind_group: wgpu::BindGroup,
@@ -70,8 +80,10 @@ impl Pipelines {
                 storage_rw_entry(2),  // tet_opp
                 storage_rw_entry(3),  // tet_info
                 storage_rw_entry(4),  // vert_tet
-                storage_rw_entry(5),  // counters
-                uniform_entry(6),     // params
+                storage_rw_entry(5),  // free_arr (unused)
+                storage_rw_entry(6),  // vert_free_arr (unused)
+                storage_rw_entry(7),  // counters
+                uniform_entry(8),     // params
             ],
         });
 
@@ -84,8 +96,10 @@ impl Pipelines {
                 buf_entry(2, &bufs.tet_opp),
                 buf_entry(3, &bufs.tet_info),
                 buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &init_params),
+                buf_entry(5, &bufs.free_arr),
+                buf_entry(6, &bufs.vert_free_arr),
+                buf_entry(7, &bufs.counters),
+                buf_entry(8, &init_params),
             ],
         });
 
@@ -260,6 +274,96 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- Update vert free list pipeline ---
+        let update_vert_free_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("update_vert_free_list.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/update_vert_free_list.wgsl").into(),
+            ),
+        });
+
+        let update_vert_free_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let update_vert_free_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("update_vert_free_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // insert_list
+                storage_rw_entry(1),  // vert_free_arr
+                storage_rw_entry(2),  // free_arr
+                uniform_entry(3),     // params (x = num_insertions, y = start_free_idx)
+            ],
+        });
+
+        let update_vert_free_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("update_vert_free_bg"),
+            layout: &update_vert_free_bgl,
+            entries: &[
+                buf_entry(0, &bufs.insert_list),
+                buf_entry(1, &bufs.vert_free_arr),
+                buf_entry(2, &bufs.free_arr),
+                buf_entry(3, &update_vert_free_params),
+            ],
+        });
+
+        let update_vert_free_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("update_vert_free_pl"),
+            bind_group_layouts: &[&update_vert_free_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let update_vert_free_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("update_vert_free_list"),
+            layout: Some(&update_vert_free_pl),
+            module: &update_vert_free_shader,
+            entry_point: Some("update_vert_free_list"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Mark split pipeline ---
+        let mark_split_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mark_split.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/mark_split.wgsl").into(),
+            ),
+        });
+
+        let mark_split_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let mark_split_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mark_split_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // insert_list
+                storage_rw_entry(1),  // tet_to_vert
+                uniform_entry(2),     // params
+            ],
+        });
+
+        let mark_split_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mark_split_bg"),
+            layout: &mark_split_bgl,
+            entries: &[
+                buf_entry(0, &bufs.insert_list),
+                buf_entry(1, &bufs.tet_to_vert),
+                buf_entry(2, &mark_split_params),
+            ],
+        });
+
+        let mark_split_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mark_split_pl"),
+            bind_group_layouts: &[&mark_split_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let mark_split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mark_split"),
+            layout: Some(&mark_split_pl),
+            module: &mark_split_shader,
+            entry_point: Some("mark_split"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Split pipeline ---
         let split_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("split.wgsl"),
@@ -273,16 +377,17 @@ impl Pipelines {
         let split_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("split_bgl"),
             entries: &[
-                storage_ro_entry(0),  // points
-                storage_rw_entry(1),  // tets
-                storage_rw_entry(2),  // tet_opp
-                storage_rw_entry(3),  // tet_info
-                storage_rw_entry(4),  // vert_tet
-                storage_ro_entry(5),  // insert_list
-                storage_rw_entry(6),  // free_stack
+                storage_rw_entry(0),  // tets
+                storage_rw_entry(1),  // tet_opp (flat atomic)
+                storage_rw_entry(2),  // tet_info
+                storage_rw_entry(3),  // vert_tet
+                storage_ro_entry(4),  // insert_list
+                storage_rw_entry(5),  // free_arr
+                storage_rw_entry(6),  // vert_free_arr
                 storage_rw_entry(7),  // counters
                 storage_rw_entry(8),  // flip_queue
-                uniform_entry(9),     // params
+                storage_rw_entry(9),  // tet_to_vert (read for neighbor check, write to clear)
+                uniform_entry(10),    // params
             ],
         });
 
@@ -290,16 +395,17 @@ impl Pipelines {
             label: Some("split_bg"),
             layout: &split_bgl,
             entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.insert_list),
-                buf_entry(6, &bufs.free_stack),
+                buf_entry(0, &bufs.tets),
+                buf_entry(1, &bufs.tet_opp),
+                buf_entry(2, &bufs.tet_info),
+                buf_entry(3, &bufs.vert_tet),
+                buf_entry(4, &bufs.insert_list),
+                buf_entry(5, &bufs.free_arr),
+                buf_entry(6, &bufs.vert_free_arr),
                 buf_entry(7, &bufs.counters),
                 buf_entry(8, &bufs.flip_queue),
-                buf_entry(9, &split_params),
+                buf_entry(9, &bufs.tet_to_vert),
+                buf_entry(10, &split_params),
             ],
         });
 
@@ -335,12 +441,13 @@ impl Pipelines {
                 storage_rw_entry(1),  // tets
                 storage_rw_entry(2),  // tet_opp
                 storage_rw_entry(3),  // tet_info
-                storage_rw_entry(4),  // free_stack
-                storage_rw_entry(5),  // counters
-                storage_ro_entry(6),  // flip_queue
-                storage_rw_entry(7),  // flip_queue_next
-                storage_rw_entry(8),  // flip_count
-                uniform_entry(9),     // params
+                storage_rw_entry(4),  // free_arr
+                storage_rw_entry(5),  // vert_free_arr
+                storage_rw_entry(6),  // counters
+                storage_ro_entry(7),  // flip_queue
+                storage_rw_entry(8),  // flip_queue_next
+                storage_rw_entry(9),  // flip_count
+                uniform_entry(10),    // params
             ],
         });
 
@@ -352,12 +459,13 @@ impl Pipelines {
                 buf_entry(1, &bufs.tets),
                 buf_entry(2, &bufs.tet_opp),
                 buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.free_stack),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &bufs.flip_queue),
-                buf_entry(7, &bufs.flip_queue_next),
-                buf_entry(8, &bufs.flip_count),
-                buf_entry(9, &flip_params),
+                buf_entry(4, &bufs.free_arr),
+                buf_entry(5, &bufs.vert_free_arr),
+                buf_entry(6, &bufs.counters),
+                buf_entry(7, &bufs.flip_queue),
+                buf_entry(8, &bufs.flip_queue_next),
+                buf_entry(9, &bufs.flip_count),
+                buf_entry(10, &flip_params),
             ],
         });
 
@@ -370,12 +478,13 @@ impl Pipelines {
                 buf_entry(1, &bufs.tets),
                 buf_entry(2, &bufs.tet_opp),
                 buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.free_stack),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &bufs.flip_queue_next),  // swapped: read from next
-                buf_entry(7, &bufs.flip_queue),        // swapped: write to original
-                buf_entry(8, &bufs.flip_count),
-                buf_entry(9, &flip_params),
+                buf_entry(4, &bufs.free_arr),
+                buf_entry(5, &bufs.vert_free_arr),
+                buf_entry(6, &bufs.counters),
+                buf_entry(7, &bufs.flip_queue_next),  // swapped: read from next
+                buf_entry(8, &bufs.flip_queue),        // swapped: write to original
+                buf_entry(9, &bufs.flip_count),
+                buf_entry(10, &flip_params),
             ],
         });
 
@@ -503,6 +612,12 @@ impl Pipelines {
             pick_pipeline,
             pick_bind_group,
             pick_params,
+            update_vert_free_pipeline,
+            update_vert_free_bind_group,
+            update_vert_free_params,
+            mark_split_pipeline,
+            mark_split_bind_group,
+            mark_split_params,
             split_pipeline,
             split_bind_group,
             split_params,

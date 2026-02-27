@@ -1,7 +1,7 @@
 use bytemuck;
 use wgpu::util::DeviceExt;
 
-use crate::types::*;
+use crate::types::{*, MEAN_VERTEX_DEGREE};
 
 /// All GPU buffers used by the Delaunay algorithm.
 pub struct GpuBuffers {
@@ -19,12 +19,20 @@ pub struct GpuBuffers {
     pub tet_vote: wgpu::Buffer,
     /// Free tet slot stack: u32 × max_tets
     pub free_stack: wgpu::Buffer,
+    /// Block-based free list: u32 × max_tets (for future use)
+    pub free_arr: wgpu::Buffer,
+    /// Per-vertex free counts: u32 × (num_points + 4) (for future use)
+    pub vert_free_arr: wgpu::Buffer,
     /// Atomic counters: u32 × 8
     pub counters: wgpu::Buffer,
     /// Uninserted point indices: u32 × N
     pub uninserted: wgpu::Buffer,
     /// Insert list: vec2<u32> × N (tet_idx, vert_idx pairs)
     pub insert_list: wgpu::Buffer,
+    /// Tet to vertex mapping: u32 × max_tets (INVALID if not splitting)
+    pub tet_to_vert: wgpu::Buffer,
+    /// Tet split mapping: vec4<u32> × max_tets (maps old_tet -> 4 new tets)
+    pub tet_split_map: wgpu::Buffer,
     /// Flip queue: u32 × (max_tets)
     pub flip_queue: wgpu::Buffer,
     /// Flip queue (double buffer): u32 × (max_tets)
@@ -105,6 +113,44 @@ impl GpuBuffers {
             usage: storage_rw,
         });
 
+        // Initialize free_arr with block-based allocation.
+        // Each vertex gets a block of MEAN_VERTEX_DEGREE tet slots.
+        // Distribute available tets across vertex blocks.
+        let num_vertices = (num_points + 4) as usize;
+        let free_arr_size = num_vertices * MEAN_VERTEX_DEGREE as usize;
+        let mut free_data = vec![0xFFFFFFFFu32; free_arr_size];
+
+        // Distribute tets 1..max_tets-1 across vertex blocks
+        // Each vertex gets a contiguous range of tets in their block
+        let mut tet_idx = 1u32; // Start from 1 (tet 0 is super-tet)
+        for vertex in 0..num_vertices {
+            let block_start = vertex * MEAN_VERTEX_DEGREE as usize;
+            let block_end = block_start + MEAN_VERTEX_DEGREE as usize;
+
+            for slot in block_start..block_end {
+                if tet_idx < max_tets {
+                    free_data[slot] = tet_idx;
+                    tet_idx += 1;
+                } else {
+                    break; // No more tets to distribute
+                }
+            }
+        }
+
+        let free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("free_arr"),
+            contents: bytemuck::cast_slice(&free_data),
+            usage: storage_rw,
+        });
+
+        // Initialize vert_free_arr: each vertex starts with MEAN_VERTEX_DEGREE free slots
+        let vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];
+        let vert_free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vert_free_arr"),
+            contents: bytemuck::cast_slice(&vert_free_data),
+            usage: storage_rw,
+        });
+
         // Counters: 8 × u32 (atomic)
         let counter_init = GpuCounters {
             free_count: max_tets - 1, // all slots except 0 are free
@@ -129,6 +175,21 @@ impl GpuBuffers {
         let insert_list = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("insert_list"),
             size: (num_points as u64) * 8, // vec2<u32> = 8 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        // Initialize tet_to_vert to INVALID (for concurrent split detection)
+        let tet_to_vert_data = vec![0xFFFFFFFFu32; max_tets as usize];
+        let tet_to_vert = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tet_to_vert"),
+            contents: bytemuck::cast_slice(&tet_to_vert_data),
+            usage: storage_rw,
+        });
+
+        let tet_split_map = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tet_split_map"),
+            size: (max_tets as u64) * 16, // vec4<u32> per tet
             usage: storage_rw,
             mapped_at_creation: false,
         });
@@ -193,9 +254,13 @@ impl GpuBuffers {
             vert_tet,
             tet_vote,
             free_stack,
+            free_arr,
+            vert_free_arr,
             counters,
             uninserted,
             insert_list,
+            tet_to_vert,
+            tet_split_map,
             flip_queue,
             flip_queue_next,
             flip_count,

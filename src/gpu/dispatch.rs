@@ -79,6 +79,28 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
     }
 
+    /// Dispatch mark split (marks tets being split for concurrent detection).
+    pub fn dispatch_mark_split(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_insertions: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.mark_split_params,
+            0,
+            bytemuck::cast_slice(&[num_insertions, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("mark_split"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.mark_split_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.mark_split_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
+    }
+
     /// Dispatch split tetra.
     pub fn dispatch_split(
         &self,

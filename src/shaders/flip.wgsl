@@ -11,14 +11,15 @@
 
 @group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read_write> tets: array<vec4<u32>>;
-@group(0) @binding(2) var<storage, read_write> tet_opp: array<vec4<u32>>;
+@group(0) @binding(2) var<storage, read_write> tet_opp: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read_write> tet_info: array<atomic<u32>>;
-@group(0) @binding(4) var<storage, read_write> free_stack: array<u32>;
-@group(0) @binding(5) var<storage, read_write> counters: array<atomic<u32>>;
-@group(0) @binding(6) var<storage, read> flip_queue: array<u32>;
-@group(0) @binding(7) var<storage, read_write> flip_queue_next: array<u32>;
-@group(0) @binding(8) var<storage, read_write> flip_count: array<atomic<u32>>; // [0] = next queue size
-@group(0) @binding(9) var<uniform> params: vec4<u32>; // x = queue_size
+@group(0) @binding(4) var<storage, read_write> free_arr: array<u32>;
+@group(0) @binding(5) var<storage, read_write> vert_free_arr: array<u32>;
+@group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
+@group(0) @binding(7) var<storage, read> flip_queue: array<u32>;
+@group(0) @binding(8) var<storage, read_write> flip_queue_next: array<u32>;
+@group(0) @binding(9) var<storage, read_write> flip_count: array<atomic<u32>>; // [0] = next queue size
+@group(0) @binding(10) var<uniform> params: vec4<u32>; // x = queue_size
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
@@ -40,6 +41,16 @@ fn decode_opp_face(packed: u32) -> u32 {
     return packed & 3u;
 }
 
+// --- Flat atomic opp accessors ---
+
+fn get_opp(tet_idx: u32, face: u32) -> u32 {
+    return atomicLoad(&tet_opp[tet_idx * 4u + face]);
+}
+
+fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
+    atomicStore(&tet_opp[tet_idx * 4u + face], val);
+}
+
 fn tet_vertex(tet: vec4<u32>, i: u32) -> u32 {
     switch i {
         case 0u: { return tet.x; }
@@ -47,26 +58,6 @@ fn tet_vertex(tet: vec4<u32>, i: u32) -> u32 {
         case 2u: { return tet.z; }
         default: { return tet.w; }
     }
-}
-
-fn opp_entry(opp: vec4<u32>, i: u32) -> u32 {
-    switch i {
-        case 0u: { return opp.x; }
-        case 1u: { return opp.y; }
-        case 2u: { return opp.z; }
-        default: { return opp.w; }
-    }
-}
-
-fn set_opp_entry(opp: vec4<u32>, i: u32, val: u32) -> vec4<u32> {
-    var r = opp;
-    switch i {
-        case 0u: { r.x = val; }
-        case 1u: { r.y = val; }
-        case 2u: { r.z = val; }
-        default: { r.w = val; }
-    }
-    return r;
 }
 
 fn set_tet_entry(tet: vec4<u32>, i: u32, val: u32) -> vec4<u32> {
@@ -140,7 +131,7 @@ fn find_local(tet: vec4<u32>, v: u32) -> u32 {
 // Pop 1 free slot from the free stack.
 fn pop_free_slot() -> u32 {
     let old_free = atomicSub(&counters[COUNTER_FREE], 1u);
-    return free_stack[old_free - 1u];
+    return free_arr[old_free - 1u];
 }
 
 // Check and perform 2-3 flips for tets in the flip queue.
@@ -164,11 +155,10 @@ fn flip_check(
     }
 
     let tet_a_data = tets[tet_a];
-    let tet_a_opp = tet_opp[tet_a];
 
     // Check each face of tet_a for Delaunay violation
     for (var face_a = 0u; face_a < 4u; face_a++) {
-        let opp_packed = opp_entry(tet_a_opp, face_a);
+        let opp_packed = get_opp(tet_a, face_a);
         if opp_packed == INVALID {
             continue;
         }
@@ -308,50 +298,20 @@ fn flip_check(
         let c2_local_s2 = find_local(c2, face_v[2]);
         let c2_local_s0 = find_local(c2, face_v[0]);
 
-        var opp_c0 = vec4<u32>(INVALID, INVALID, INVALID, INVALID);
-        var opp_c1 = vec4<u32>(INVALID, INVALID, INVALID, INVALID);
-        var opp_c2 = vec4<u32>(INVALID, INVALID, INVALID, INVALID);
-
+        // === Internal adjacency ===
         // C0↔C1: C0 face opp face_v[0] <-> C1 face opp face_v[2]
-        // (The face opposite face_v[0] in C0 = face at local index of face_v[0] in C0)
-        opp_c0 = set_opp_entry(opp_c0, c0_local_s0, encode_opp(tet_b, c1_local_s2));
-        opp_c1 = set_opp_entry(opp_c1, c1_local_s2, encode_opp(tet_a, c0_local_s0));
+        set_opp_at(tet_a, c0_local_s0, encode_opp(tet_b, c1_local_s2));
+        set_opp_at(tet_b, c1_local_s2, encode_opp(tet_a, c0_local_s0));
 
         // C1↔C2: C1 face opp face_v[1] <-> C2 face opp face_v[0]
-        opp_c1 = set_opp_entry(opp_c1, c1_local_s1, encode_opp(new_slot, c2_local_s0));
-        opp_c2 = set_opp_entry(opp_c2, c2_local_s0, encode_opp(tet_b, c1_local_s1));
+        set_opp_at(tet_b, c1_local_s1, encode_opp(new_slot, c2_local_s0));
+        set_opp_at(new_slot, c2_local_s0, encode_opp(tet_b, c1_local_s1));
 
         // C2↔C0: C2 face opp face_v[2] <-> C0 face opp face_v[1]
-        opp_c2 = set_opp_entry(opp_c2, c2_local_s2, encode_opp(tet_a, c0_local_s1));
-        opp_c0 = set_opp_entry(opp_c0, c0_local_s1, encode_opp(new_slot, c2_local_s2));
+        set_opp_at(new_slot, c2_local_s2, encode_opp(tet_a, c0_local_s1));
+        set_opp_at(tet_a, c0_local_s1, encode_opp(new_slot, c2_local_s2));
 
         // === External adjacency ===
-        // Each new tet has 2 external faces: one from tet_a and one from tet_b.
-        // Tet_a had 4 faces. Face face_a was the shared face (now gone).
-        // The other 3 faces of tet_a each excluded one of face_v[0,1,2].
-        // Similarly for tet_b.
-        //
-        // For each shared vertex sk:
-        //   - In tet_a, the face opposite sk has local index find_local(tet_a_data, sk).
-        //     This face maps to the new tet that does NOT contain sk:
-        //       If sk == face_v[0]: goes to C1 (which has face_v[1],face_v[2] but not face_v[0])
-        //         Wait - C0 has face_v[0],face_v[1]. C1 has face_v[1],face_v[2]. C2 has face_v[2],face_v[0].
-        //       Actually: C0 has {va,vb,s0,s1}, C1 has {va,vb,s1,s2}, C2 has {va,vb,s2,s0}.
-        //       Face NOT containing sk (which came from tet_a side):
-        //         s0 is NOT in C1 → A's face-opp-s0 → C1's face-opp-va
-        //         s1 is NOT in C2 → A's face-opp-s1 → C2's face-opp-va
-        //         s2 is NOT in C0 → A's face-opp-s2 → C0's face-opp-va
-        //
-        //       From tet_b side:
-        //         s0 is NOT in C1 → B's face-opp-s0 → C1's face-opp-vb
-        //         s1 is NOT in C2 → B's face-opp-s1 → C2's face-opp-vb
-        //         s2 is NOT in C0 → B's face-opp-s2 → C0's face-opp-vb
-
-        // Re-read adjacency (may have been partially overwritten in previous iterations but
-        // we read these at the top of the function)
-        let tet_a_opp_local = tet_a_opp;
-        let tet_b_opp = tet_opp[tet_b];
-
         let c0_local_va = find_local(c0, va);
         let c0_local_vb = find_local(c0, vb);
         let c1_local_va = find_local(c1, va);
@@ -362,80 +322,63 @@ fn flip_check(
         // From tet_a: face opposite face_v[k] in tet_a -> new tet that doesn't have face_v[k]
         // s2 not in C0 -> C0 gets A's face-opp-s2, assigned to C0's face-opp-va
         let a_local_s2 = find_local(tet_a_data, face_v[2]);
-        let ext_a_s2 = opp_entry(tet_a_opp_local, a_local_s2);
-        opp_c0 = set_opp_entry(opp_c0, c0_local_va, ext_a_s2);
+        let ext_a_s2 = get_opp(tet_a, a_local_s2);
+        set_opp_at(tet_a, c0_local_va, ext_a_s2);
 
         // s0 not in C1 -> C1 gets A's face-opp-s0
         let a_local_s0 = find_local(tet_a_data, face_v[0]);
-        let ext_a_s0 = opp_entry(tet_a_opp_local, a_local_s0);
-        opp_c1 = set_opp_entry(opp_c1, c1_local_va, ext_a_s0);
+        let ext_a_s0 = get_opp(tet_a, a_local_s0);
+        set_opp_at(tet_b, c1_local_va, ext_a_s0);
 
         // s1 not in C2 -> C2 gets A's face-opp-s1
         let a_local_s1 = find_local(tet_a_data, face_v[1]);
-        let ext_a_s1 = opp_entry(tet_a_opp_local, a_local_s1);
-        opp_c2 = set_opp_entry(opp_c2, c2_local_va, ext_a_s1);
+        let ext_a_s1 = get_opp(tet_a, a_local_s1);
+        set_opp_at(new_slot, c2_local_va, ext_a_s1);
 
         // From tet_b: face opposite face_v[k] in tet_b -> new tet that doesn't have face_v[k]
         let b_local_s2 = find_local(tet_b_data, face_v[2]);
-        let ext_b_s2 = opp_entry(tet_b_opp, b_local_s2);
-        opp_c0 = set_opp_entry(opp_c0, c0_local_vb, ext_b_s2);
+        let ext_b_s2 = get_opp(tet_b, b_local_s2);
+        set_opp_at(tet_a, c0_local_vb, ext_b_s2);
 
         let b_local_s0 = find_local(tet_b_data, face_v[0]);
-        let ext_b_s0 = opp_entry(tet_b_opp, b_local_s0);
-        opp_c1 = set_opp_entry(opp_c1, c1_local_vb, ext_b_s0);
+        let ext_b_s0 = get_opp(tet_b, b_local_s0);
+        set_opp_at(tet_b, c1_local_vb, ext_b_s0);
 
         let b_local_s1 = find_local(tet_b_data, face_v[1]);
-        let ext_b_s1 = opp_entry(tet_b_opp, b_local_s1);
-        opp_c2 = set_opp_entry(opp_c2, c2_local_vb, ext_b_s1);
-
-        // Write adjacency
-        tet_opp[tet_a] = opp_c0;
-        tet_opp[tet_b] = opp_c1;
-        tet_opp[new_slot] = opp_c2;
+        let ext_b_s1 = get_opp(tet_b, b_local_s1);
+        set_opp_at(new_slot, c2_local_vb, ext_b_s1);
 
         // === Back-pointer fix ===
         // Update each external neighbor's tet_opp to point back to the correct new tet.
         if ext_a_s2 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s2);
             let n_face = decode_opp_face(ext_a_s2);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(tet_a, c0_local_va));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(tet_a, c0_local_va));
         }
         if ext_a_s0 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s0);
             let n_face = decode_opp_face(ext_a_s0);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(tet_b, c1_local_va));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(tet_b, c1_local_va));
         }
         if ext_a_s1 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s1);
             let n_face = decode_opp_face(ext_a_s1);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(new_slot, c2_local_va));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(new_slot, c2_local_va));
         }
         if ext_b_s2 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s2);
             let n_face = decode_opp_face(ext_b_s2);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(tet_a, c0_local_vb));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(tet_a, c0_local_vb));
         }
         if ext_b_s0 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s0);
             let n_face = decode_opp_face(ext_b_s0);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(tet_b, c1_local_vb));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(tet_b, c1_local_vb));
         }
         if ext_b_s1 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s1);
             let n_face = decode_opp_face(ext_b_s1);
-            var n_opp = tet_opp[n_tet];
-            n_opp = set_opp_entry(n_opp, n_face, encode_opp(new_slot, c2_local_vb));
-            tet_opp[n_tet] = n_opp;
+            set_opp_at(n_tet, n_face, encode_opp(new_slot, c2_local_vb));
         }
 
         // Mark new tets as alive (clear lock)

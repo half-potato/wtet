@@ -13,24 +13,28 @@
 //   - Internal faces between T0..T3 link to each other
 //   - External faces keep the original neighbour (but the neighbour needs updating too)
 //
+// tet_opp is a flat array<atomic<u32>> indexed as [tet_idx * 4 + face].
+//
 // Dispatch: ceil(num_insertions / 64)
 
-@group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
-@group(0) @binding(1) var<storage, read_write> tets: array<vec4<u32>>;
-@group(0) @binding(2) var<storage, read_write> tet_opp: array<vec4<u32>>;
-@group(0) @binding(3) var<storage, read_write> tet_info: array<u32>;
-@group(0) @binding(4) var<storage, read_write> vert_tet: array<u32>;
-@group(0) @binding(5) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
-@group(0) @binding(6) var<storage, read_write> free_stack: array<u32>;
+@group(0) @binding(0) var<storage, read_write> tets: array<vec4<u32>>;
+@group(0) @binding(1) var<storage, read_write> tet_opp: array<atomic<u32>>;
+@group(0) @binding(2) var<storage, read_write> tet_info: array<u32>;
+@group(0) @binding(3) var<storage, read_write> vert_tet: array<u32>;
+@group(0) @binding(4) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
+@group(0) @binding(5) var<storage, read_write> free_arr: array<u32>;
+@group(0) @binding(6) var<storage, read_write> vert_free_arr: array<u32>;
 @group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> flip_queue: array<u32>; // tets needing flip check
-@group(0) @binding(9) var<uniform> params: vec4<u32>; // x = num_insertions
+@group(0) @binding(9) var<storage, read_write> tet_to_vert: array<u32>; // maps old_tet_idx -> vertex being inserted (or INVALID)
+@group(0) @binding(10) var<uniform> params: vec4<u32>; // x = num_insertions
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
 const TET_CHANGED: u32 = 2u;
 const COUNTER_FREE: u32 = 0u;
 const COUNTER_ACTIVE: u32 = 1u;
+const MEAN_VERTEX_DEGREE: u32 = 64u;
 
 fn encode_opp(tet_idx: u32, face: u32) -> u32 {
     return (tet_idx << 2u) | (face & 3u);
@@ -44,13 +48,31 @@ fn decode_opp_face(packed: u32) -> u32 {
     return packed & 3u;
 }
 
-// Pop 3 free slots from the free stack.
-fn pop_free_slots(count: u32) -> vec3<u32> {
-    let old_free = atomicSub(&counters[COUNTER_FREE], count);
+// --- Flat atomic opp accessors ---
+
+fn get_opp(tet_idx: u32, face: u32) -> u32 {
+    return atomicLoad(&tet_opp[tet_idx * 4u + face]);
+}
+
+fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
+    atomicStore(&tet_opp[tet_idx * 4u + face], val);
+}
+
+// Get 3 free tet slots from this vertex's block using block-based allocation.
+fn get_free_slots(vertex: u32) -> vec3<u32> {
+    // Calculate the top index of this vertex's block
+    let block_top = (vertex + 1u) * MEAN_VERTEX_DEGREE - 1u;
+
+    // Read 3 slots backwards from the top (we need 3 new tets, original tet reused)
     var slots: vec3<u32>;
-    slots.x = free_stack[old_free - 1u];
-    slots.y = free_stack[old_free - 2u];
-    slots.z = free_stack[old_free - 3u];
+    slots.x = free_arr[block_top];
+    slots.y = free_arr[block_top - 1u];
+    slots.z = free_arr[block_top - 2u];
+
+    // Decrement this vertex's free count by 4 (we use 4 tets total: 1 reused + 3 new)
+    // Note: No atomic needed because only one thread per vertex splits
+    vert_free_arr[vertex] -= 4u;
+
     return slots;
 }
 
@@ -71,14 +93,18 @@ fn split_tetra(
 
     // Read original tet
     let orig = tets[t0];
-    let orig_opp = tet_opp[t0];
+    // Read original adjacency (per-face atomic loads)
+    let orig_opp_0 = get_opp(t0, 0u);
+    let orig_opp_1 = get_opp(t0, 1u);
+    let orig_opp_2 = get_opp(t0, 2u);
+    let orig_opp_3 = get_opp(t0, 3u);
     let v0 = orig.x;
     let v1 = orig.y;
     let v2 = orig.z;
     let v3 = orig.w;
 
-    // Allocate 3 new tet slots
-    let new_slots = pop_free_slots(3u);
+    // Allocate 3 new tet slots from this vertex's block
+    let new_slots = get_free_slots(p);
     let t1 = new_slots.x;
     let t2 = new_slots.y;
     let t3 = new_slots.z;
@@ -112,71 +138,44 @@ fn split_tetra(
     //   Specifically, face i in Tk connects to face k in Ti.
 
     // T0 adjacency:
-    tet_opp[t0] = vec4<u32>(
-        orig_opp.x,           // face 0: external (was opp v0)
-        encode_opp(t1, 0u),   // face 1: T1's face 0
-        encode_opp(t2, 0u),   // face 2: T2's face 0
-        encode_opp(t3, 0u)    // face 3: T3's face 0
-    );
+    set_opp_at(t0, 0u, orig_opp_0);           // face 0: external (was opp v0)
+    set_opp_at(t0, 1u, encode_opp(t1, 0u));   // face 1: T1's face 0
+    set_opp_at(t0, 2u, encode_opp(t2, 0u));   // face 2: T2's face 0
+    set_opp_at(t0, 3u, encode_opp(t3, 0u));   // face 3: T3's face 0
 
     // T1 adjacency:
-    tet_opp[t1] = vec4<u32>(
-        encode_opp(t0, 1u),   // face 0: T0's face 1
-        orig_opp.y,           // face 1: external (was opp v1)
-        encode_opp(t2, 1u),   // face 2: T2's face 1
-        encode_opp(t3, 1u)    // face 3: T3's face 1
-    );
+    set_opp_at(t1, 0u, encode_opp(t0, 1u));   // face 0: T0's face 1
+    set_opp_at(t1, 1u, orig_opp_1);           // face 1: external (was opp v1)
+    set_opp_at(t1, 2u, encode_opp(t2, 1u));   // face 2: T2's face 1
+    set_opp_at(t1, 3u, encode_opp(t3, 1u));   // face 3: T3's face 1
 
     // T2 adjacency:
-    tet_opp[t2] = vec4<u32>(
-        encode_opp(t0, 2u),   // face 0: T0's face 2
-        encode_opp(t1, 2u),   // face 1: T1's face 2
-        orig_opp.z,           // face 2: external (was opp v2)
-        encode_opp(t3, 2u)    // face 3: T3's face 2
-    );
+    set_opp_at(t2, 0u, encode_opp(t0, 2u));   // face 0: T0's face 2
+    set_opp_at(t2, 1u, encode_opp(t1, 2u));   // face 1: T1's face 2
+    set_opp_at(t2, 2u, orig_opp_2);           // face 2: external (was opp v2)
+    set_opp_at(t2, 3u, encode_opp(t3, 2u));   // face 3: T3's face 2
 
     // T3 adjacency:
-    tet_opp[t3] = vec4<u32>(
-        encode_opp(t0, 3u),   // face 0: T0's face 3
-        encode_opp(t1, 3u),   // face 1: T1's face 3
-        encode_opp(t2, 3u),   // face 2: T2's face 3
-        orig_opp.w            // face 3: external (was opp v3)
-    );
+    set_opp_at(t3, 0u, encode_opp(t0, 3u));   // face 0: T0's face 3
+    set_opp_at(t3, 1u, encode_opp(t1, 3u));   // face 1: T1's face 3
+    set_opp_at(t3, 2u, encode_opp(t2, 3u));   // face 2: T2's face 3
+    set_opp_at(t3, 3u, orig_opp_3);           // face 3: external (was opp v3)
 
     // Update external neighbours to point back to us.
-    // For each face k, the external neighbour (if any) that pointed to (t0, face k)
-    // now needs to point to (tk, face k).
+    // Handle concurrent splits: if neighbor has also split, calculate its new tet location.
+    let ext_opps = array<u32, 4>(orig_opp_0, orig_opp_1, orig_opp_2, orig_opp_3);
+    let new_tets = array<u32, 4>(t0, t1, t2, t3);
+
     for (var k = 0u; k < 4u; k++) {
-        var ext_opp: u32;
-        switch k {
-            case 0u: { ext_opp = orig_opp.x; }
-            case 1u: { ext_opp = orig_opp.y; }
-            case 2u: { ext_opp = orig_opp.z; }
-            default: { ext_opp = orig_opp.w; }
-        }
+        let ext_opp = ext_opps[k];
 
         if ext_opp != INVALID {
-            let ext_tet = decode_opp_tet(ext_opp);
-            let ext_face = decode_opp_face(ext_opp);
+            var nei_tet = decode_opp_tet(ext_opp);
+            var nei_face = decode_opp_face(ext_opp);
 
-            var new_tet: u32;
-            switch k {
-                case 0u: { new_tet = t0; }
-                case 1u: { new_tet = t1; }
-                case 2u: { new_tet = t2; }
-                default: { new_tet = t3; }
-            }
-
-            // Update the external neighbour's opp entry
-            // tet_opp[ext_tet][ext_face] = encode_opp(new_tet, k)
-            var opp_val = tet_opp[ext_tet];
-            switch ext_face {
-                case 0u: { opp_val.x = encode_opp(new_tet, k); }
-                case 1u: { opp_val.y = encode_opp(new_tet, k); }
-                case 2u: { opp_val.z = encode_opp(new_tet, k); }
-                default: { opp_val.w = encode_opp(new_tet, k); }
-            }
-            tet_opp[ext_tet] = opp_val;
+            // TODO: Concurrent split detection is causing segfaults - needs more debugging
+            // For now, treat all neighbors as unsplit
+            set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], k));
         }
     }
 
@@ -185,6 +184,12 @@ fn split_tetra(
     tet_info[t1] = TET_ALIVE | TET_CHANGED;
     tet_info[t2] = TET_ALIVE | TET_CHANGED;
     tet_info[t3] = TET_ALIVE | TET_CHANGED;
+
+    // Clear tet_to_vert for the newly allocated tets to prevent stale values
+    tet_to_vert[t1] = INVALID;
+    tet_to_vert[t2] = INVALID;
+    tet_to_vert[t3] = INVALID;
+    // Note: t0's entry will be cleared in the next iteration's mark_split
 
     // Update active count (added 3, original already counted)
     atomicAdd(&counters[COUNTER_ACTIVE], 3u);
