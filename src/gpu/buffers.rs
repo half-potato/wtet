@@ -48,6 +48,14 @@ pub struct GpuBuffers {
     /// Staging buffer for readback
     pub staging: wgpu::Buffer,
 
+    // Debug buffers
+    /// Breadcrumbs: u32 per thread (marks progress through shader)
+    pub breadcrumbs: wgpu::Buffer,
+    /// Per-thread debug slots: 16 * vec4<u32> per thread
+    pub thread_debug: wgpu::Buffer,
+    /// Debug buffer for update_uninserted_vert_tet kernel: 4 * vec4<u32> per thread
+    pub update_debug: wgpu::Buffer,
+
     pub num_points: u32,
     pub max_tets: u32,
 }
@@ -123,18 +131,23 @@ impl GpuBuffers {
         // Distribute tets 1..max_tets-1 across vertex blocks
         // Each vertex gets a contiguous range of tets in their block
         let mut tet_idx = 1u32; // Start from 1 (tet 0 is super-tet)
+        let mut vert_free_data = vec![0u32; num_vertices];  // Count ACTUAL tets per vertex
+
         for vertex in 0..num_vertices {
             let block_start = vertex * MEAN_VERTEX_DEGREE as usize;
             let block_end = block_start + MEAN_VERTEX_DEGREE as usize;
 
+            let mut count = 0u32;
             for slot in block_start..block_end {
                 if tet_idx < max_tets {
                     free_data[slot] = tet_idx;
                     tet_idx += 1;
+                    count += 1;
                 } else {
                     break; // No more tets to distribute
                 }
             }
+            vert_free_data[vertex] = count;  // Store ACTUAL count, not MEAN_VERTEX_DEGREE
         }
 
         let free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -142,9 +155,6 @@ impl GpuBuffers {
             contents: bytemuck::cast_slice(&free_data),
             usage: storage_rw,
         });
-
-        // Initialize vert_free_arr: each vertex starts with MEAN_VERTEX_DEGREE free slots
-        let vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];
         let vert_free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vert_free_arr"),
             contents: bytemuck::cast_slice(&vert_free_data),
@@ -246,6 +256,29 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        // Debug buffers: breadcrumbs (u32 per thread) and debug slots (16 * vec4 per thread)
+        let max_threads = max_tets; // Conservative: as many threads as tets
+        let breadcrumbs = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("breadcrumbs"),
+            size: (max_threads as u64) * 4, // u32 per thread
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let thread_debug = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("thread_debug"),
+            size: (max_threads as u64) * 16 * 16, // 16 vec4<u32> per thread
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let update_debug = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("update_debug"),
+            size: (max_threads as u64) * 4 * 16, // 4 vec4<u32> per thread
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
         Self {
             points: points_buf,
             tets,
@@ -268,6 +301,9 @@ impl GpuBuffers {
             prefix_sum_data,
             prefix_sum_blocks,
             staging,
+            breadcrumbs,
+            thread_debug,
+            update_debug,
             num_points,
             max_tets,
         }
@@ -399,5 +435,99 @@ impl GpuBuffers {
             contents: bytemuck::cast_slice(&params),
             usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
         })
+    }
+
+    /// Read breadcrumbs (u32 per thread)
+    pub async fn read_breadcrumbs(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        num_threads: usize,
+    ) -> Vec<u32> {
+        self.read_buffer_as(device, queue, &self.breadcrumbs, num_threads)
+            .await
+    }
+
+    /// Read debug slots for a specific thread (16 vec4<u32>)
+    pub async fn read_thread_debug(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        thread_id: usize,
+    ) -> Vec<[u32; 4]> {
+        let offset = thread_id * 16 * 16; // 16 vec4<u32> per thread
+        let size = 16 * 16; // bytes
+
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("thread_debug_staging"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.thread_debug, offset as u64, &staging, 0, size as u64);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.await.unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        let raw: Vec<u32> = bytemuck::cast_slice(&data[..]).to_vec();
+        drop(data);
+        staging.unmap();
+
+        // Convert to array of [u32; 4]
+        raw.chunks_exact(4).map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]]).collect()
+    }
+
+    /// Read update_debug data for the first num_threads threads.
+    /// Returns a vector where each element is 4 vec4<u32> values for one thread.
+    pub async fn read_update_debug(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        num_threads: usize,
+    ) -> Vec<[[u32; 4]; 4]> {
+        let size = num_threads * 4 * 16; // 4 vec4<u32> per thread
+
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("update_debug_staging"),
+            size: size as u64,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(&self.update_debug, 0, &staging, 0, size as u64);
+        queue.submit(Some(encoder.finish()));
+
+        let slice = staging.slice(..);
+        let (tx, rx) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::Maintain::Wait);
+        rx.await.unwrap().unwrap();
+
+        let data = slice.get_mapped_range();
+        let raw: Vec<u32> = bytemuck::cast_slice(&data[..]).to_vec();
+        drop(data);
+        staging.unmap();
+
+        // Convert to array of [[u32; 4]; 4] (4 vec4s per thread)
+        raw.chunks_exact(16).map(|chunk| {
+            [
+                [chunk[0], chunk[1], chunk[2], chunk[3]],
+                [chunk[4], chunk[5], chunk[6], chunk[7]],
+                [chunk[8], chunk[9], chunk[10], chunk[11]],
+                [chunk[12], chunk[13], chunk[14], chunk[15]],
+            ]
+        }).collect()
     }
 }

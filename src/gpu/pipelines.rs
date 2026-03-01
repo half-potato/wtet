@@ -37,6 +37,11 @@ pub struct Pipelines {
     pub split_bind_group: wgpu::BindGroup,
     pub split_params: wgpu::Buffer,
 
+    // Pipeline: update uninserted vert_tet (fixes dead tet references)
+    pub update_uninserted_vert_tet_pipeline: wgpu::ComputePipeline,
+    pub update_uninserted_vert_tet_bind_group: wgpu::BindGroup,
+    pub update_uninserted_vert_tet_params: wgpu::Buffer,
+
     // Pipeline: flip check
     pub flip_pipeline: wgpu::ComputePipeline,
     pub flip_bind_group: wgpu::BindGroup,
@@ -388,6 +393,8 @@ impl Pipelines {
                 storage_rw_entry(8),  // flip_queue
                 storage_rw_entry(9),  // tet_to_vert (read for neighbor check, write to clear)
                 uniform_entry(10),    // params
+                storage_rw_entry(11), // breadcrumbs (debug)
+                storage_rw_entry(12), // thread_debug (debug)
             ],
         });
 
@@ -406,6 +413,8 @@ impl Pipelines {
                 buf_entry(8, &bufs.flip_queue),
                 buf_entry(9, &bufs.tet_to_vert),
                 buf_entry(10, &split_params),
+                buf_entry(11, &bufs.breadcrumbs),
+                buf_entry(12, &bufs.thread_debug),
             ],
         });
 
@@ -420,6 +429,52 @@ impl Pipelines {
             layout: Some(&split_pl),
             module: &split_shader,
             entry_point: Some("split_tetra"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Update uninserted vert_tet pipeline ---
+        let update_uninserted_vert_tet_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("update_uninserted_vert_tet.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/update_uninserted_vert_tet.wgsl").into(),
+            ),
+        });
+
+        let update_uninserted_vert_tet_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let update_uninserted_vert_tet_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("update_uninserted_vert_tet_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // tet_info
+                storage_ro_entry(1),  // uninserted
+                storage_rw_entry(2),  // vert_tet
+                uniform_entry(3),     // params
+            ],
+        });
+
+        let update_uninserted_vert_tet_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("update_uninserted_vert_tet_bg"),
+            layout: &update_uninserted_vert_tet_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.uninserted),
+                buf_entry(2, &bufs.vert_tet),
+                buf_entry(3, &update_uninserted_vert_tet_params),
+            ],
+        });
+
+        let update_uninserted_vert_tet_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("update_uninserted_vert_tet_pl"),
+            bind_group_layouts: &[&update_uninserted_vert_tet_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let update_uninserted_vert_tet_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("update_uninserted_vert_tet"),
+            layout: Some(&update_uninserted_vert_tet_pl),
+            module: &update_uninserted_vert_tet_shader,
+            entry_point: Some("update_uninserted_vert_tet"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -621,6 +676,9 @@ impl Pipelines {
             split_pipeline,
             split_bind_group,
             split_params,
+            update_uninserted_vert_tet_pipeline,
+            update_uninserted_vert_tet_bind_group,
+            update_uninserted_vert_tet_params,
             flip_pipeline,
             flip_bind_group,
             flip_bind_group_b,

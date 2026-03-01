@@ -94,6 +94,15 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
+        // 5c. Update uninserted vert_tet to fix dead tet references
+        // After splitting, uninserted points may still point to dead tets.
+        // Update all uninserted points (including just-inserted ones) to point to an alive tet.
+        // The inserted ones will be removed from the list later, so updating them is harmless.
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_update_uninserted_vert_tet(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
         // 6. Flip checking (optional, iterative)
         if config.enable_flipping {
             let mut flip_queue_size = num_inserted * 4; // 4 tets per insertion

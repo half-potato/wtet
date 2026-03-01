@@ -132,12 +132,21 @@ tet_info[old_tet] = 0u;
 - ❌ Unknown issue prevents insertions
 
 **Suspected Causes:**
-1. Using `old_tet` variable instead of `t0` breaks assumptions elsewhere
-2. Marking old tet dead before/after writing new tets causes timing issue
-3. Some other part of pipeline expects `t0` to be from `insert_list`
-4. Buffer initialization bug (though `vert_free_arr` bug was found and fixed)
+1. ~~Buffer initialization~~ ✅ FIXED
+2. ~~Allocation logic broken~~ ✅ WORKS (isolated test passes!)
+3. Using `old_tet` variable instead of `t0` breaks assumptions elsewhere
+4. Marking old tet dead before/after writing new tets causes timing issue
+5. Some step AFTER allocation in split kernel fails
 
-**Bug Found During Investigation:**
+**BREAKTHROUGH (2026-02-26):**
+Created isolated test (`tests/test_4tet_allocation.rs`) that tests ONLY the allocation:
+- ✅ Test PASSES - allocation works perfectly in isolation!
+- ✅ Returns correct indices [64, 63, 62, 61]
+- ✅ Decrements vert_free_arr correctly
+
+**Conclusion:** The bug is NOT in `get_free_slots_4tet` itself, but in how those allocated tets are USED in the split kernel or broader pipeline.
+
+**Bugs Found During Investigation:**
 ```rust
 // WRONG: All vertices get MEAN_VERTEX_DEGREE
 let vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];

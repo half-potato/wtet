@@ -282,6 +282,19 @@ fn test_delaunay_4_points() {
             pollster::block_on(crate::gpu::GpuState::new(device, queue, &normalized, &config));
         pollster::block_on(crate::phase1::run(device, queue, &mut state, &config));
 
+        // DEBUG: Read counters
+        let counters = pollster::block_on(state.buffers.read_counters(device, queue));
+        eprintln!("DEBUG Counters:");
+        eprintln!("  free_count (split attempts): {}", counters.free_count);
+        eprintln!("  failed_count (alloc success): {}", counters.failed_count);
+        eprintln!("  scratch[0] (fn entry): {}", counters.scratch[0]);
+        eprintln!("  scratch[1] (count sum): {}", counters.scratch[1]);
+        eprintln!("  scratch[2] (super-tet splits): {}", counters.scratch[2]);
+        eprintln!("  scratch[3] (invalid allocs): {}", counters.scratch[3]);
+        eprintln!("  active_count: {}", counters.active_count);
+        eprintln!("  inserted_count: {}", counters.inserted_count);
+        eprintln!("  Uninserted: {}", state.uninserted.len());
+
         // All points should have been inserted (uninserted list empty)
         assert!(
             state.uninserted.is_empty(),

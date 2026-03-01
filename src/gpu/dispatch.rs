@@ -123,6 +123,34 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
     }
 
+    /// Dispatch update_uninserted_vert_tet to fix dead tet references.
+    pub fn dispatch_update_uninserted_vert_tet(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+    ) {
+        log::debug!(
+            "Updating vert_tet for {} uninserted vertices (max_tets={})",
+            num_uninserted,
+            self.max_tets
+        );
+
+        queue.write_buffer(
+            &self.pipelines.update_uninserted_vert_tet_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, self.max_tets, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("update_uninserted_vert_tet"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.update_uninserted_vert_tet_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.update_uninserted_vert_tet_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+    }
+
     /// Dispatch flip check.
     ///
     /// When `use_alternate` is true, uses the swapped bind group where
