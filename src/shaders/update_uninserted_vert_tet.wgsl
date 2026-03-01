@@ -25,7 +25,8 @@ fn update_uninserted_vert_tet(
     }
 
     let vert_idx = uninserted[idx];
-    let old_tet = vert_tet[vert_idx];
+    // CRITICAL: vert_tet is position-indexed, use idx not vert_idx!
+    let old_tet = vert_tet[idx];
 
     // Debug: record start state (idx, vert_idx, old_tet, num_uninserted)
     update_debug[idx * 4u + 0u] = vec4<u32>(idx, vert_idx, old_tet, num_uninserted);
@@ -36,13 +37,14 @@ fn update_uninserted_vert_tet(
     for (var tet_idx = 1u; tet_idx < 100u; tet_idx++) {
         if (tet_info[tet_idx] & TET_ALIVE) != 0u {
             found_tet = tet_idx;
-            vert_tet[vert_idx] = tet_idx;
+            // CRITICAL: vert_tet is position-indexed, use idx not vert_idx!
+            vert_tet[idx] = tet_idx;
             break;
         }
     }
 
     // Debug: record result (found_tet, new vert_tet value, alive status of old tet, 0)
-    let new_tet = vert_tet[vert_idx];
+    let new_tet = vert_tet[idx];
     let old_status = tet_info[old_tet];
     update_debug[idx * 4u + 1u] = vec4<u32>(found_tet, new_tet, old_status, 0u);
 

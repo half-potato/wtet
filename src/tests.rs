@@ -160,6 +160,7 @@ fn test_normalize_points() {
 fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG,
         ..Default::default()
     });
 
@@ -170,7 +171,7 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     }))?;
 
     let mut limits = wgpu::Limits::default();
-    limits.max_storage_buffers_per_shader_stage = 10;
+    limits.max_storage_buffers_per_shader_stage = 16; // Increased for debug buffers in split shader
     limits.max_bind_groups = 4;
 
     let (device, queue) = pollster::block_on(adapter.request_device(

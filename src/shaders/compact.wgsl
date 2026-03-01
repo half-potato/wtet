@@ -38,10 +38,11 @@ fn remap_opp(packed: u32, cmap: ptr<storage, array<u32>, read>) -> u32 {
     if packed == INVALID {
         return INVALID;
     }
-    let old_tet = packed >> 2u;
-    let face = packed & 3u;
+    // TetOpp decoding: must match init.wgsl (5-bit shift)
+    let old_tet = packed >> 5u;
+    let opp_vi = packed & 31u;
     let new_tet = (*cmap)[old_tet];
-    return (new_tet << 2u) | face;
+    return (new_tet << 5u) | opp_vi;
 }
 
 @compute @workgroup_size(64)

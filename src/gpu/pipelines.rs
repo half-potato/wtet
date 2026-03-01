@@ -22,6 +22,11 @@ pub struct Pipelines {
     pub pick_bind_group: wgpu::BindGroup,
     pub pick_params: wgpu::Buffer,
 
+    // Pipeline: build insert list from tet_vert winners
+    pub build_insert_list_pipeline: wgpu::ComputePipeline,
+    pub build_insert_list_bind_group: wgpu::BindGroup,
+    pub build_insert_list_params: wgpu::Buffer,
+
     // Pipeline: update vert free list (allocates tet blocks for inserting vertices)
     pub update_vert_free_pipeline: wgpu::ComputePipeline,
     pub update_vert_free_bind_group: wgpu::BindGroup,
@@ -31,6 +36,11 @@ pub struct Pipelines {
     pub mark_split_pipeline: wgpu::ComputePipeline,
     pub mark_split_bind_group: wgpu::BindGroup,
     pub mark_split_params: wgpu::Buffer,
+
+    // Pipeline: split points (updates vert_tet for vertices whose tets are splitting)
+    pub split_points_pipeline: wgpu::ComputePipeline,
+    pub split_points_bind_group: wgpu::BindGroup,
+    pub split_points_params: wgpu::Buffer,
 
     // Pipeline: split tetra
     pub split_pipeline: wgpu::ComputePipeline,
@@ -183,17 +193,18 @@ impl Pipelines {
             ),
         });
 
+        // params: x = num_uninserted, y = insertion_rule (0=circumcenter, 1=centroid, 2=random)
         let vote_params = GpuBuffers::create_params_buffer(device, [num_points, 0, 0, 0]);
 
         let vote_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("vote_bgl"),
             entries: &[
                 storage_ro_entry(0),  // points
-                storage_ro_entry(1),  // tets
-                storage_ro_entry(2),  // tet_info
-                storage_rw_entry(3),  // tet_vote
-                storage_ro_entry(4),  // vert_tet
-                storage_ro_entry(5),  // uninserted
+                storage_ro_entry(1),  // uninserted (vertexArr in original)
+                storage_ro_entry(2),  // vert_tet (vertexTetArr in original)
+                storage_ro_entry(3),  // tets
+                storage_rw_entry(4),  // vert_sphere (vertSphereArr - atomic i32)
+                storage_rw_entry(5),  // tet_sphere (tetSphereArr - atomic i32)
                 uniform_entry(6),     // params
             ],
         });
@@ -203,11 +214,11 @@ impl Pipelines {
             layout: &vote_bgl,
             entries: &[
                 buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_info),
-                buf_entry(3, &bufs.tet_vote),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.uninserted),
+                buf_entry(1, &bufs.uninserted),
+                buf_entry(2, &bufs.vert_tet),
+                buf_entry(3, &bufs.tets),
+                buf_entry(4, &bufs.vert_sphere),
+                buf_entry(5, &bufs.tet_sphere),
                 buf_entry(6, &vote_params),
             ],
         });
@@ -235,18 +246,18 @@ impl Pipelines {
             ),
         });
 
-        let pick_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+        // params: x = num_uninserted
+        let pick_params = GpuBuffers::create_params_buffer(device, [num_points, 0, 0, 0]);
 
         let pick_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pick_bgl"),
             entries: &[
-                storage_ro_entry(0),  // tets
-                storage_ro_entry(1),  // tet_info
-                storage_ro_entry(2),  // tet_vote (read-only i32)
-                storage_ro_entry(3),  // uninserted
-                storage_rw_entry(4),  // insert_list
-                storage_rw_entry(5),  // counters
-                uniform_entry(6),     // params
+                storage_ro_entry(0),  // uninserted (vertexArr in original)
+                storage_ro_entry(1),  // vert_tet (vertexTetArr in original)
+                storage_rw_entry(2),  // vert_sphere (vertSphereArr - atomic i32, need RW for atomicLoad)
+                storage_rw_entry(3),  // tet_sphere (tetSphereArr - atomic i32, need RW for atomicLoad)
+                storage_rw_entry(4),  // tet_vert (tetVertArr - atomic i32)
+                uniform_entry(5),     // params
             ],
         });
 
@@ -254,13 +265,12 @@ impl Pipelines {
             label: Some("pick_bg"),
             layout: &pick_bgl,
             entries: &[
-                buf_entry(0, &bufs.tets),
-                buf_entry(1, &bufs.tet_info),
-                buf_entry(2, &bufs.tet_vote),
-                buf_entry(3, &bufs.uninserted),
-                buf_entry(4, &bufs.insert_list),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &pick_params),
+                buf_entry(0, &bufs.uninserted),
+                buf_entry(1, &bufs.vert_tet),
+                buf_entry(2, &bufs.vert_sphere),
+                buf_entry(3, &bufs.tet_sphere),
+                buf_entry(4, &bufs.tet_vert),
+                buf_entry(5, &pick_params),
             ],
         });
 
@@ -275,6 +285,56 @@ impl Pipelines {
             layout: Some(&pick_pl),
             module: &pick_shader,
             entry_point: Some("pick_winner_point"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Build insert list pipeline ---
+        let build_insert_list_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("build_insert_list.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/build_insert_list.wgsl").into(),
+            ),
+        });
+
+        let build_insert_list_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+
+        let build_insert_list_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("build_insert_list_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // tet_info
+                storage_rw_entry(1),  // tet_vert (atomic i32, needs RW)
+                storage_ro_entry(2),  // uninserted
+                storage_rw_entry(3),  // insert_list
+                storage_rw_entry(4),  // counters
+                uniform_entry(5),     // params
+            ],
+        });
+
+        let build_insert_list_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("build_insert_list_bg"),
+            layout: &build_insert_list_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.tet_vert),
+                buf_entry(2, &bufs.uninserted),
+                buf_entry(3, &bufs.insert_list),
+                buf_entry(4, &bufs.counters),
+                buf_entry(5, &build_insert_list_params),
+            ],
+        });
+
+        let build_insert_list_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("build_insert_list_pl"),
+            bind_group_layouts: &[&build_insert_list_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let build_insert_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("build_insert_list"),
+            layout: Some(&build_insert_list_pl),
+            module: &build_insert_list_shader,
+            entry_point: Some("build_insert_list"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -296,6 +356,7 @@ impl Pipelines {
                 storage_rw_entry(1),  // vert_free_arr
                 storage_rw_entry(2),  // free_arr
                 uniform_entry(3),     // params (x = num_insertions, y = start_free_idx)
+                storage_ro_entry(4),  // uninserted (to convert position→vertex)
             ],
         });
 
@@ -307,6 +368,7 @@ impl Pipelines {
                 buf_entry(1, &bufs.vert_free_arr),
                 buf_entry(2, &bufs.free_arr),
                 buf_entry(3, &update_vert_free_params),
+                buf_entry(4, &bufs.uninserted),
             ],
         });
 
@@ -369,6 +431,60 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- Split points pipeline ---
+        let split_points_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("split_points.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/split_points.wgsl").into(),
+            ),
+        });
+
+        let split_points_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let split_points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("split_points_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // points
+                storage_ro_entry(1),  // uninserted
+                storage_rw_entry(2),  // vert_tet
+                storage_ro_entry(3),  // tet_to_vert
+                storage_ro_entry(4),  // tets
+                storage_ro_entry(5),  // free_arr
+                storage_ro_entry(6),  // insert_list
+                uniform_entry(7),     // params
+            ],
+        });
+
+        let split_points_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("split_points_bg"),
+            layout: &split_points_bgl,
+            entries: &[
+                buf_entry(0, &bufs.points),
+                buf_entry(1, &bufs.uninserted),
+                buf_entry(2, &bufs.vert_tet),
+                buf_entry(3, &bufs.tet_to_vert),
+                buf_entry(4, &bufs.tets),
+                buf_entry(5, &bufs.free_arr),
+                buf_entry(6, &bufs.insert_list),
+                buf_entry(7, &split_points_params),
+            ],
+        });
+
+        let split_points_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("split_points_pl"),
+            bind_group_layouts: &[&split_points_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let split_points_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("split_points"),
+            layout: Some(&split_points_pl),
+            module: &split_points_shader,
+            entry_point: Some("split_points"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Split pipeline ---
         let split_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("split.wgsl"),
@@ -395,6 +511,7 @@ impl Pipelines {
                 uniform_entry(10),    // params
                 storage_rw_entry(11), // breadcrumbs (debug)
                 storage_rw_entry(12), // thread_debug (debug)
+                storage_ro_entry(13), // uninserted (to get vertex from position)
             ],
         });
 
@@ -415,6 +532,7 @@ impl Pipelines {
                 buf_entry(10, &split_params),
                 buf_entry(11, &bufs.breadcrumbs),
                 buf_entry(12, &bufs.thread_debug),
+                buf_entry(13, &bufs.uninserted),
             ],
         });
 
@@ -450,6 +568,7 @@ impl Pipelines {
                 storage_ro_entry(1),  // uninserted
                 storage_rw_entry(2),  // vert_tet
                 uniform_entry(3),     // params
+                storage_rw_entry(4),  // update_debug
             ],
         });
 
@@ -461,6 +580,7 @@ impl Pipelines {
                 buf_entry(1, &bufs.uninserted),
                 buf_entry(2, &bufs.vert_tet),
                 buf_entry(3, &update_uninserted_vert_tet_params),
+                buf_entry(4, &bufs.update_debug),
             ],
         });
 
@@ -566,13 +686,16 @@ impl Pipelines {
             ),
         });
 
-        let reset_votes_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+        // params: x = num_uninserted, y = max_tets
+        let reset_votes_params = GpuBuffers::create_params_buffer(device, [num_points, max_tets, 0, 0]);
 
         let reset_votes_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reset_votes_bgl"),
             entries: &[
-                storage_rw_entry(0),  // tet_vote
-                uniform_entry(1),     // params
+                storage_rw_entry(0),  // vert_sphere
+                storage_rw_entry(1),  // tet_sphere
+                storage_rw_entry(2),  // tet_vert
+                uniform_entry(3),     // params
             ],
         });
 
@@ -580,8 +703,10 @@ impl Pipelines {
             label: Some("reset_votes_bg"),
             layout: &reset_votes_bgl,
             entries: &[
-                buf_entry(0, &bufs.tet_vote),
-                buf_entry(1, &reset_votes_params),
+                buf_entry(0, &bufs.vert_sphere),
+                buf_entry(1, &bufs.tet_sphere),
+                buf_entry(2, &bufs.tet_vert),
+                buf_entry(3, &reset_votes_params),
             ],
         });
 
@@ -667,12 +792,18 @@ impl Pipelines {
             pick_pipeline,
             pick_bind_group,
             pick_params,
+            build_insert_list_pipeline,
+            build_insert_list_bind_group,
+            build_insert_list_params,
             update_vert_free_pipeline,
             update_vert_free_bind_group,
             update_vert_free_params,
             mark_split_pipeline,
             mark_split_bind_group,
             mark_split_params,
+            split_points_pipeline,
+            split_points_bind_group,
+            split_points_params,
             split_pipeline,
             split_bind_group,
             split_params,

@@ -8,12 +8,13 @@
 //
 // Dispatch: ceil((num_insertions * MEAN_VERTEX_DEGREE) / 64)
 
-@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
+@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, position)
 @group(0) @binding(1) var<storage, read_write> vert_free_arr: array<u32>;
 @group(0) @binding(2) var<storage, read_write> free_arr: array<u32>;
 @group(0) @binding(3) var<uniform> params: vec4<u32>; // x = num_insertions, y = start_free_idx
+@group(0) @binding(4) var<storage, read> uninserted: array<u32>;
 
-const MEAN_VERTEX_DEGREE: u32 = 64u;
+const MEAN_VERTEX_DEGREE: u32 = 8u; // From original KerCommon.h line 56
 
 @compute @workgroup_size(64)
 fn update_vert_free_list(
@@ -32,8 +33,9 @@ fn update_vert_free_list(
     let ins_idx = idx / MEAN_VERTEX_DEGREE;
     let loc_idx = idx % MEAN_VERTEX_DEGREE;
 
-    // Get the vertex index from insert_list
-    let vert_idx = insert_list[ins_idx].y;
+    // Get the position from insert_list, then lookup actual vertex index
+    let position = insert_list[ins_idx].y;
+    let vert_idx = uninserted[position];
 
     // Allocate tet index for this slot
     let tet_idx = start_free_idx + idx;

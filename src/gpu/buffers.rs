@@ -15,8 +15,14 @@ pub struct GpuBuffers {
     pub tet_info: wgpu::Buffer,
     /// Tet containing each uninserted point: u32 × N
     pub vert_tet: wgpu::Buffer,
-    /// Vote buffer: i32 × max_tets
+    /// Vote buffer: i32 × max_tets (legacy, for backward compatibility)
     pub tet_vote: wgpu::Buffer,
+    /// Sphere values for vertices: i32 × N (from original vertSphereArr)
+    pub vert_sphere: wgpu::Buffer,
+    /// Sphere values for tets: i32 × max_tets (from original tetSphereArr)
+    pub tet_sphere: wgpu::Buffer,
+    /// Tet to vertex winner mapping: i32 × max_tets (from original tetVertArr)
+    pub tet_vert: wgpu::Buffer,
     /// Free tet slot stack: u32 × max_tets
     pub free_stack: wgpu::Buffer,
     /// Block-based free list: u32 × max_tets (for future use)
@@ -100,8 +106,8 @@ impl GpuBuffers {
 
         let vert_tet = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vert_tet"),
-            // N real points + 4 super-tet
-            size: ((num_points + 4) as u64) * 4,
+            // Position-indexed by uninserted array, so only N real points
+            size: (num_points as u64) * 4,
             usage: storage_rw,
             mapped_at_creation: false,
         });
@@ -111,6 +117,30 @@ impl GpuBuffers {
             size: (max_tets as u64) * 4,
             usage: storage_rw,
             mapped_at_creation: false,
+        });
+
+        // Initialize vert_sphere to 0 (from original vertSphereArr)
+        let vert_sphere_data = vec![0i32; num_points as usize];
+        let vert_sphere = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("vert_sphere"),
+            contents: bytemuck::cast_slice(&vert_sphere_data),
+            usage: storage_rw,
+        });
+
+        // Initialize tet_sphere to 0 (from original tetSphereArr)
+        let tet_sphere_data = vec![0i32; max_tets as usize];
+        let tet_sphere = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tet_sphere"),
+            contents: bytemuck::cast_slice(&tet_sphere_data),
+            usage: storage_rw,
+        });
+
+        // Initialize tet_vert to INT_MAX (from original tetVertArr)
+        let tet_vert_data = vec![0x7FFFFFFFi32; max_tets as usize];
+        let tet_vert = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("tet_vert"),
+            contents: bytemuck::cast_slice(&tet_vert_data),
+            usage: storage_rw,
         });
 
         // Free stack: initially filled with indices [1..max_tets) since tet 0 is the super-tet
@@ -286,6 +316,9 @@ impl GpuBuffers {
             tet_info,
             vert_tet,
             tet_vote,
+            vert_sphere,
+            tet_sphere,
+            tet_vert,
             free_stack,
             free_arr,
             vert_free_arr,

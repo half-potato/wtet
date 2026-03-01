@@ -60,8 +60,8 @@ fn locate_points(
     let vert_idx = uninserted[idx];
     let p = points[vert_idx].xyz;
 
-    // Start from the last known tet
-    var tet_idx = vert_tet[vert_idx];
+    // Start from the last known tet - indexed by position (idx), not vertex!
+    var tet_idx = vert_tet[idx];
 
     // If the tet is dead, start from 0
     if tet_idx == INVALID || (tet_info[tet_idx] & TET_ALIVE) == 0u {
@@ -91,7 +91,8 @@ fn locate_points(
                     found = true;
                     break;
                 }
-                tet_idx = neighbour >> 2u;
+                // Decode TetOpp: tet_idx is in upper bits (shifted left by 5)
+                tet_idx = neighbour >> 5u;
                 found = false;
                 break;
             }
@@ -102,5 +103,6 @@ fn locate_points(
         }
     }
 
-    vert_tet[vert_idx] = tet_idx;
+    // Store result - indexed by position (idx), not vertex!
+    vert_tet[idx] = tet_idx;
 }

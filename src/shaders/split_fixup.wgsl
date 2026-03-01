@@ -6,7 +6,7 @@
 //
 // For each insertion, we need to check all 4 new tets' external faces.
 
-@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
+@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, position)
 @group(0) @binding(1) var<storage, read> tet_to_vert: array<u32>; // maps tet_idx -> vert (or INVALID)
 @group(0) @binding(2) var<storage, read> tet_split_map: array<vec4<u32>>; // old_tet -> (t0,t1,t2,t3)
 @group(0) @binding(3) var<storage, read_write> tet_opp: array<atomic<u32>>;
@@ -14,16 +14,17 @@
 
 const INVALID: u32 = 0xFFFFFFFFu;
 
+// TetOpp encoding from CommonTypes.h line 266 - must match init.wgsl and split.wgsl
 fn decode_opp_tet(packed: u32) -> u32 {
-    return packed >> 2u;
+    return packed >> 5u;
 }
 
-fn decode_opp_face(packed: u32) -> u32 {
-    return packed & 3u;
+fn decode_opp_vi(packed: u32) -> u32 {
+    return packed & 31u; // Extract lower 5 bits
 }
 
-fn encode_opp(tet_idx: u32, face: u32) -> u32 {
-    return (tet_idx << 2u) | (face & 3u);
+fn encode_opp(tet_idx: u32, opp_vi: u32) -> u32 {
+    return (tet_idx << 5u) | opp_vi;
 }
 
 fn get_opp(tet_idx: u32, face: u32) -> u32 {
@@ -64,7 +65,7 @@ fn fixup_split_adjacency(
         }
 
         let nei_tet = decode_opp_tet(opp_packed);
-        let nei_face = decode_opp_face(opp_packed);
+        let nei_face = decode_opp_vi(opp_packed);
 
         // Bounds check: if nei_tet is out of range, skip
         if nei_tet >= arrayLength(&tet_to_vert) {

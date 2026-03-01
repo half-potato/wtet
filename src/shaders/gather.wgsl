@@ -90,8 +90,9 @@ fn gather_failed(
             continue;
         }
 
-        let opp_tet_idx = opp_packed >> 2u;
-        let opp_face = opp_packed & 3u;
+        // TetOpp decoding: must match init.wgsl encoding (5-bit shift)
+        let opp_tet_idx = opp_packed >> 5u;
+        let opp_face = opp_packed & 31u; // Extract lower 5 bits (opp_vi)
 
         // Only check if our index < neighbour index (avoid double-counting)
         if tet_idx >= opp_tet_idx {

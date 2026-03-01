@@ -12,16 +12,17 @@
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
 
-fn encode_opp(tet_idx: u32, face: u32) -> u32 {
-    return (tet_idx << 2u) | (face & 3u);
+// TetOpp encoding from CommonTypes.h line 266 - must match init.wgsl and split.wgsl
+fn encode_opp(tet_idx: u32, opp_vi: u32) -> u32 {
+    return (tet_idx << 5u) | opp_vi;
 }
 
 fn decode_opp_tet(packed: u32) -> u32 {
-    return packed >> 2u;
+    return packed >> 5u;
 }
 
-fn decode_opp_face(packed: u32) -> u32 {
-    return packed & 3u;
+fn decode_opp_vi(packed: u32) -> u32 {
+    return packed & 31u; // Extract lower 5 bits
 }
 
 fn get_opp(tet_idx: u32, face: u32) -> u32 {
@@ -54,7 +55,7 @@ fn fixup_adjacency(
 
         if my_opp != INVALID {
             let nei_tet = decode_opp_tet(my_opp);
-            let nei_face = decode_opp_face(my_opp);
+            let nei_face = decode_opp_vi(my_opp);
 
             // Bounds check
             if nei_tet >= max_tets {
@@ -71,7 +72,7 @@ fn fixup_adjacency(
             // Check if neighbor points back to us
             let nei_back_opp = get_opp(nei_tet, nei_face);
             let back_tet = decode_opp_tet(nei_back_opp);
-            let back_face = decode_opp_face(nei_back_opp);
+            let back_face = decode_opp_vi(nei_back_opp);
 
             // If neighbor doesn't point back, fix it
             if back_tet != tet_idx || back_face != face {

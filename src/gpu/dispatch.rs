@@ -58,16 +58,17 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 
-    /// Dispatch pick winner.
+    /// Dispatch pick winner (iterates over uninserted vertices).
     pub fn dispatch_pick_winner(
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
+        num_uninserted: u32,
     ) {
         queue.write_buffer(
             &self.pipelines.pick_params,
             0,
-            bytemuck::cast_slice(&[self.max_tets, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -76,6 +77,27 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.pick_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.pick_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+    }
+
+    /// Dispatch build insert list (scans tets to build insert_list from tet_vert winners).
+    pub fn dispatch_build_insert_list(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.build_insert_list_params,
+            0,
+            bytemuck::cast_slice(&[self.max_tets, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("build_insert_list"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.build_insert_list_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.build_insert_list_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
     }
 
@@ -99,6 +121,28 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.mark_split_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.mark_split_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
+    }
+
+    /// Dispatch split points (update vert_tet for vertices whose tets are splitting).
+    pub fn dispatch_split_points(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.split_points_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("split_points"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.split_points_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.split_points_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 
     /// Dispatch split tetra.
@@ -183,14 +227,22 @@ impl GpuState {
     }
 
     /// Dispatch reset votes.
-    pub fn dispatch_reset_votes(&self, encoder: &mut wgpu::CommandEncoder) {
+    pub fn dispatch_reset_votes(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_uninserted: u32) {
+        queue.write_buffer(
+            &self.pipelines.reset_votes_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, self.max_tets, 0u32, 0u32]),
+        );
+
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reset_votes"),
             timestamp_writes: None,
         });
         pass.set_pipeline(&self.pipelines.reset_votes_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.reset_votes_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
+        // Dispatch enough workgroups for both arrays
+        let max_size = std::cmp::max(num_uninserted, self.max_tets);
+        pass.dispatch_workgroups(div_ceil(max_size, 64), 1, 1);
     }
 
     /// Dispatch gather failed vertices.

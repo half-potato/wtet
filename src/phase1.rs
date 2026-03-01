@@ -47,8 +47,8 @@ pub async fn run(
         // Encode the insertion pipeline
         let mut encoder = device.create_command_encoder(&Default::default());
 
-        // 1. Reset votes
-        state.dispatch_reset_votes(&mut encoder);
+        // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
+        state.dispatch_reset_votes(&mut encoder, queue, num_uninserted);
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
@@ -59,15 +59,21 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 3. Vote
+        // 3. Vote (each vertex votes for its tet)
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_vote(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 4. Pick winners
+        // 4. Pick winners (determine winning vertex per tet)
         let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_pick_winner(&mut encoder, queue);
+        state.dispatch_pick_winner(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // 5. Build insert list from winners
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_build_insert_list(&mut encoder, queue);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
@@ -75,12 +81,23 @@ pub async fn run(
         let counters = state.buffers.read_counters(device, queue).await;
         let num_inserted = counters.inserted_count;
 
+        println!("[DEBUG] Iteration {}: num_inserted = {}", iteration, num_inserted);
+
         if num_inserted == 0 {
+            // Debug: Read back vert_tet and tet_vert to see why no winners
+            println!("[DEBUG] No winners found! Investigating...");
+            println!("[DEBUG] Remaining uninserted: {:?}", state.uninserted);
+
             log::warn!("No points inserted in iteration {} — breaking", iteration);
             break;
         }
 
-        log::debug!("Inserting {} points", num_inserted);
+        println!(
+            "[DEBUG] Iteration {}: Inserting {} points (uninserted before removal: {})",
+            iteration,
+            num_inserted,
+            num_uninserted
+        );
 
         // 5a. Mark split (for concurrent split detection)
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -88,20 +105,19 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 5b. Split
+        // 5b. Split points (update vert_tet for vertices whose tets are splitting)
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_split_points(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // 5c. Split
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split(&mut encoder, queue, num_inserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 5c. Update uninserted vert_tet to fix dead tet references
-        // After splitting, uninserted points may still point to dead tets.
-        // Update all uninserted points (including just-inserted ones) to point to an alive tet.
-        // The inserted ones will be removed from the list later, so updating them is harmless.
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_update_uninserted_vert_tet(&mut encoder, queue, num_uninserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        // Note: We don't update vert_tet here because it will be done at the start of the next iteration
 
         // 6. Flip checking (optional, iterative)
         if config.enable_flipping {
@@ -143,8 +159,8 @@ pub async fn run(
             .uninserted
             .retain(|v| !inserted_set.contains(v));
 
-        log::debug!(
-            "After iteration {}: {} points remaining",
+        println!(
+            "[DEBUG] After iteration {}: {} points remaining",
             iteration,
             state.uninserted.len()
         );
@@ -158,11 +174,19 @@ pub async fn run(
         device.poll(wgpu::Maintain::Wait);
     }
 
-    log::info!(
-        "Phase 1 complete after {} iterations, {} points remaining",
-        iteration,
-        state.uninserted.len()
-    );
+    if !state.uninserted.is_empty() {
+        println!(
+            "[WARNING] Phase 1 complete after {} iterations, {} points FAILED to insert: {:?}",
+            iteration,
+            state.uninserted.len(),
+            state.uninserted
+        );
+    } else {
+        println!(
+            "[INFO] Phase 1 complete after {} iterations, all points inserted",
+            iteration
+        );
+    }
 }
 
 /// Read back the vertex indices that were inserted this iteration.
@@ -176,11 +200,17 @@ async fn read_inserted_verts(
         return Vec::new();
     }
 
-    // insert_list is vec2<u32> (tet_idx, vert_idx) — we want the vert_idx
+    // insert_list is vec2<u32> (tet_idx, position) — pair[1] is position in uninserted array
     let raw: Vec<[u32; 2]> = state
         .buffers
         .read_buffer_as(device, queue, &state.buffers.insert_list, count)
         .await;
 
-    raw.iter().map(|pair| pair[1]).collect()
+    // Convert positions to actual vertex indices
+    raw.iter()
+        .map(|pair| {
+            let position = pair[1] as usize;
+            state.uninserted[position]
+        })
+        .collect()
 }

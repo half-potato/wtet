@@ -29,16 +29,17 @@ const TET_LOCKED: u32 = 8u;
 const COUNTER_FREE: u32 = 0u;
 const COUNTER_ACTIVE: u32 = 1u;
 
-fn encode_opp(tet_idx: u32, face: u32) -> u32 {
-    return (tet_idx << 2u) | (face & 3u);
+// TetOpp encoding from CommonTypes.h line 266 - must match init.wgsl and split.wgsl
+fn encode_opp(tet_idx: u32, opp_vi: u32) -> u32 {
+    return (tet_idx << 5u) | opp_vi;
 }
 
 fn decode_opp_tet(packed: u32) -> u32 {
-    return packed >> 2u;
+    return packed >> 5u;
 }
 
-fn decode_opp_face(packed: u32) -> u32 {
-    return packed & 3u;
+fn decode_opp_vi(packed: u32) -> u32 {
+    return packed & 31u; // Extract lower 5 bits
 }
 
 // --- Flat atomic opp accessors ---
@@ -164,7 +165,7 @@ fn flip_check(
         }
 
         let tet_b = decode_opp_tet(opp_packed);
-        let face_b = decode_opp_face(opp_packed);
+        let face_b = decode_opp_vi(opp_packed);
 
         // Only process if tet_a < tet_b (avoid double processing)
         if tet_a >= tet_b {
@@ -352,32 +353,32 @@ fn flip_check(
         // Update each external neighbor's tet_opp to point back to the correct new tet.
         if ext_a_s2 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s2);
-            let n_face = decode_opp_face(ext_a_s2);
+            let n_face = decode_opp_vi(ext_a_s2);
             set_opp_at(n_tet, n_face, encode_opp(tet_a, c0_local_va));
         }
         if ext_a_s0 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s0);
-            let n_face = decode_opp_face(ext_a_s0);
+            let n_face = decode_opp_vi(ext_a_s0);
             set_opp_at(n_tet, n_face, encode_opp(tet_b, c1_local_va));
         }
         if ext_a_s1 != INVALID {
             let n_tet = decode_opp_tet(ext_a_s1);
-            let n_face = decode_opp_face(ext_a_s1);
+            let n_face = decode_opp_vi(ext_a_s1);
             set_opp_at(n_tet, n_face, encode_opp(new_slot, c2_local_va));
         }
         if ext_b_s2 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s2);
-            let n_face = decode_opp_face(ext_b_s2);
+            let n_face = decode_opp_vi(ext_b_s2);
             set_opp_at(n_tet, n_face, encode_opp(tet_a, c0_local_vb));
         }
         if ext_b_s0 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s0);
-            let n_face = decode_opp_face(ext_b_s0);
+            let n_face = decode_opp_vi(ext_b_s0);
             set_opp_at(n_tet, n_face, encode_opp(tet_b, c1_local_vb));
         }
         if ext_b_s1 != INVALID {
             let n_tet = decode_opp_tet(ext_b_s1);
-            let n_face = decode_opp_face(ext_b_s1);
+            let n_face = decode_opp_vi(ext_b_s1);
             set_opp_at(n_tet, n_face, encode_opp(new_slot, c2_local_vb));
         }
 
