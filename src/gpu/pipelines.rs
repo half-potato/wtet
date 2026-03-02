@@ -22,6 +22,11 @@ pub struct Pipelines {
     pub pick_bind_group: wgpu::BindGroup,
     pub pick_params: wgpu::Buffer,
 
+    // Pipeline: negate inserted verts (mark successful insertions)
+    pub negate_inserted_verts_pipeline: wgpu::ComputePipeline,
+    pub negate_inserted_verts_bind_group: wgpu::BindGroup,
+    pub negate_inserted_verts_params: wgpu::Buffer,
+
     // Pipeline: build insert list from tet_vert winners
     pub build_insert_list_pipeline: wgpu::ComputePipeline,
     pub build_insert_list_bind_group: wgpu::BindGroup,
@@ -37,6 +42,11 @@ pub struct Pipelines {
     pub mark_split_bind_group: wgpu::BindGroup,
     pub mark_split_params: wgpu::Buffer,
 
+    // Pipeline: mark tet empty (sets empty flag on all tets before split)
+    pub mark_tet_empty_pipeline: wgpu::ComputePipeline,
+    pub mark_tet_empty_bind_group: wgpu::BindGroup,
+    pub mark_tet_empty_params: wgpu::Buffer,
+
     // Pipeline: split points (updates vert_tet for vertices whose tets are splitting)
     pub split_points_pipeline: wgpu::ComputePipeline,
     pub split_points_bind_group: wgpu::BindGroup,
@@ -46,6 +56,11 @@ pub struct Pipelines {
     pub split_pipeline: wgpu::ComputePipeline,
     pub split_bind_group: wgpu::BindGroup,
     pub split_params: wgpu::Buffer,
+
+    // Pipeline: split fixup (fixes adjacency for concurrent splits)
+    pub split_fixup_pipeline: wgpu::ComputePipeline,
+    pub split_fixup_bind_group: wgpu::BindGroup,
+    pub split_fixup_params: wgpu::Buffer,
 
     // Pipeline: update uninserted vert_tet (fixes dead tet references)
     pub update_uninserted_vert_tet_pipeline: wgpu::ComputePipeline,
@@ -68,6 +83,76 @@ pub struct Pipelines {
     pub gather_pipeline: wgpu::ComputePipeline,
     pub gather_bind_group: wgpu::BindGroup,
     pub gather_params: wgpu::Buffer,
+
+    // Pipeline: collect free slots (compaction)
+    pub collect_free_slots_pipeline: wgpu::ComputePipeline,
+    pub collect_free_slots_bind_group: wgpu::BindGroup,
+    pub collect_free_slots_params: wgpu::Buffer,
+
+    // Pipeline: make compact map (compaction)
+    pub make_compact_map_pipeline: wgpu::ComputePipeline,
+    pub make_compact_map_bind_group: wgpu::BindGroup,
+    pub make_compact_map_params: wgpu::Buffer,
+
+    // Pipeline: compact tets (compaction)
+    pub compact_tets_pipeline: wgpu::ComputePipeline,
+    pub compact_tets_bind_group: wgpu::BindGroup,
+    pub compact_tets_params: wgpu::Buffer,
+
+    // Pipeline: mark special tets (flip management)
+    pub mark_special_tets_pipeline: wgpu::ComputePipeline,
+    pub mark_special_tets_bind_group: wgpu::BindGroup,
+    pub mark_special_tets_params: wgpu::Buffer,
+
+    // Pipeline: update flip trace (flip management)
+    pub update_flip_trace_pipeline: wgpu::ComputePipeline,
+    pub update_flip_trace_bind_group: wgpu::BindGroup,
+    pub update_flip_trace_params: wgpu::Buffer,
+
+    // Pipeline: update block vert free list (block allocation)
+    pub update_block_vert_free_list_pipeline: wgpu::ComputePipeline,
+    pub update_block_vert_free_list_bind_group: wgpu::BindGroup,
+    pub update_block_vert_free_list_params: wgpu::Buffer,
+
+    // Pipeline: update block opp tet idx (block allocation)
+    pub update_block_opp_tet_idx_pipeline: wgpu::ComputePipeline,
+    pub update_block_opp_tet_idx_bind_group: wgpu::BindGroup,
+    pub update_block_opp_tet_idx_params: wgpu::Buffer,
+
+    // Pipeline: shift inf free idx (index shifting)
+    pub shift_inf_free_idx_pipeline: wgpu::ComputePipeline,
+    pub shift_inf_free_idx_bind_group: wgpu::BindGroup,
+    pub shift_inf_free_idx_params: wgpu::Buffer,
+
+    // Pipeline: update tet idx (index shifting)
+    pub update_tet_idx_pipeline: wgpu::ComputePipeline,
+    pub update_tet_idx_bind_group: wgpu::BindGroup,
+    pub update_tet_idx_params: wgpu::Buffer,
+
+    // Pipeline: shift opp tet idx (index shifting)
+    pub shift_opp_tet_idx_pipeline: wgpu::ComputePipeline,
+    pub shift_opp_tet_idx_bind_group: wgpu::BindGroup,
+    pub shift_opp_tet_idx_params: wgpu::Buffer,
+
+    // Pipeline: shift tet idx (index shifting)
+    pub shift_tet_idx_pipeline: wgpu::ComputePipeline,
+    pub shift_tet_idx_bind_group: wgpu::BindGroup,
+    pub shift_tet_idx_params: wgpu::Buffer,
+
+    // Pipeline: make reverse map (utility)
+    pub make_reverse_map_pipeline: wgpu::ComputePipeline,
+    pub make_reverse_map_bind_group: wgpu::BindGroup,
+    pub make_reverse_map_params: wgpu::Buffer,
+
+    // Pipeline: update opp (CRITICAL - flip adjacency updates)
+    pub update_opp_pipeline: wgpu::ComputePipeline,
+    pub update_opp_bind_group: wgpu::BindGroup,
+    pub update_opp_params: wgpu::Buffer,
+
+    // Pipeline: mark rejected flips (flip validation)
+    pub mark_rejected_flips_pipeline: wgpu::ComputePipeline,
+    pub mark_rejected_flips_bind_group: wgpu::BindGroup,
+    pub mark_rejected_flips_params: wgpu::Buffer,
 }
 
 impl Pipelines {
@@ -289,6 +374,50 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- Negate inserted verts pipeline ---
+        let negate_inserted_verts_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("negate_inserted_verts.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/negate_inserted_verts.wgsl").into(),
+            ),
+        });
+
+        let negate_inserted_verts_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let negate_inserted_verts_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("negate_inserted_verts_bgl"),
+            entries: &[
+                storage_rw_entry(0),  // vert_tet
+                storage_ro_entry(1),  // tet_vert
+                uniform_entry(2),     // params
+            ],
+        });
+
+        let negate_inserted_verts_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("negate_inserted_verts_bg"),
+            layout: &negate_inserted_verts_bgl,
+            entries: &[
+                buf_entry(0, &bufs.vert_tet),
+                buf_entry(1, &bufs.tet_vert),
+                buf_entry(2, &negate_inserted_verts_params),
+            ],
+        });
+
+        let negate_inserted_verts_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("negate_inserted_verts_pl"),
+            bind_group_layouts: &[&negate_inserted_verts_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let negate_inserted_verts_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("negate_inserted_verts"),
+            layout: Some(&negate_inserted_verts_pl),
+            module: &negate_inserted_verts_shader,
+            entry_point: Some("negate_inserted_verts"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Build insert list pipeline ---
         let build_insert_list_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("build_insert_list.wgsl"),
@@ -431,6 +560,48 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- Mark tet empty pipeline ---
+        let mark_tet_empty_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mark_tet_empty.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/mark_tet_empty.wgsl").into(),
+            ),
+        });
+
+        let mark_tet_empty_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let mark_tet_empty_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mark_tet_empty_bgl"),
+            entries: &[
+                storage_rw_entry(0),  // tet_info
+                uniform_entry(1),     // params
+            ],
+        });
+
+        let mark_tet_empty_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mark_tet_empty_bg"),
+            layout: &mark_tet_empty_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &mark_tet_empty_params),
+            ],
+        });
+
+        let mark_tet_empty_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mark_tet_empty_pl"),
+            bind_group_layouts: &[&mark_tet_empty_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let mark_tet_empty_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mark_tet_empty"),
+            layout: Some(&mark_tet_empty_pl),
+            module: &mark_tet_empty_shader,
+            entry_point: Some("mark_tet_empty"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Split points pipeline ---
         let split_points_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("split_points.wgsl"),
@@ -450,8 +621,7 @@ impl Pipelines {
                 storage_ro_entry(3),  // tet_to_vert
                 storage_ro_entry(4),  // tets
                 storage_ro_entry(5),  // free_arr
-                storage_ro_entry(6),  // insert_list
-                uniform_entry(7),     // params
+                uniform_entry(6),     // params
             ],
         });
 
@@ -465,8 +635,7 @@ impl Pipelines {
                 buf_entry(3, &bufs.tet_to_vert),
                 buf_entry(4, &bufs.tets),
                 buf_entry(5, &bufs.free_arr),
-                buf_entry(6, &bufs.insert_list),
-                buf_entry(7, &split_points_params),
+                buf_entry(6, &split_points_params),
             ],
         });
 
@@ -547,6 +716,54 @@ impl Pipelines {
             layout: Some(&split_pl),
             module: &split_shader,
             entry_point: Some("split_tetra"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Split fixup pipeline ---
+        let split_fixup_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("split_fixup.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/split_fixup.wgsl").into(),
+            ),
+        });
+
+        let split_fixup_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let split_fixup_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("split_fixup_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // insert_list
+                storage_ro_entry(1),  // tet_to_vert
+                storage_ro_entry(2),  // tet_split_map
+                storage_rw_entry(3),  // tet_opp
+                uniform_entry(4),     // params
+            ],
+        });
+
+        let split_fixup_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("split_fixup_bg"),
+            layout: &split_fixup_bgl,
+            entries: &[
+                buf_entry(0, &bufs.insert_list),
+                buf_entry(1, &bufs.tet_to_vert),
+                buf_entry(2, &bufs.tet_split_map),
+                buf_entry(3, &bufs.tet_opp),
+                buf_entry(4, &split_fixup_params),
+            ],
+        });
+
+        let split_fixup_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("split_fixup_pl"),
+            bind_group_layouts: &[&split_fixup_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let split_fixup_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("split_fixup"),
+            layout: Some(&split_fixup_pl),
+            module: &split_fixup_shader,
+            entry_point: Some("fixup_split_adjacency"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -792,6 +1009,9 @@ impl Pipelines {
             pick_pipeline,
             pick_bind_group,
             pick_params,
+            negate_inserted_verts_pipeline,
+            negate_inserted_verts_bind_group,
+            negate_inserted_verts_params,
             build_insert_list_pipeline,
             build_insert_list_bind_group,
             build_insert_list_params,
@@ -801,12 +1021,18 @@ impl Pipelines {
             mark_split_pipeline,
             mark_split_bind_group,
             mark_split_params,
+            mark_tet_empty_pipeline,
+            mark_tet_empty_bind_group,
+            mark_tet_empty_params,
             split_points_pipeline,
             split_points_bind_group,
             split_points_params,
             split_pipeline,
             split_bind_group,
             split_params,
+            split_fixup_pipeline,
+            split_fixup_bind_group,
+            split_fixup_params,
             update_uninserted_vert_tet_pipeline,
             update_uninserted_vert_tet_bind_group,
             update_uninserted_vert_tet_params,

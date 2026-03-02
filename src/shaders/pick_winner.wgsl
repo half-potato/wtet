@@ -26,6 +26,13 @@ fn pick_winner_point(
     // Lines 323-325: EXACT MATCH to original - all indexed by idx!
     let vert_s_val = atomicLoad(&vert_sphere[idx]);   // Line 323: vertSphereArr[idx]
     let tet_idx = vert_tet[idx];                       // Line 324: vertexTetArr[idx]
+
+    // Skip if vertex is already inserted (tet_idx == INVALID)
+    const INVALID_U32: u32 = 0xFFFFFFFFu;
+    if tet_idx == INVALID_U32 {
+        return;
+    }
+
     let win_s_val = atomicLoad(&tet_sphere[tet_idx]); // Line 325: tetSphereArr[tetIdx]
 
     // Lines 329-330: Check if vertex is winner

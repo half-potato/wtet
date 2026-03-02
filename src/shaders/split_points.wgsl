@@ -7,11 +7,10 @@
 @group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> uninserted: array<u32>; // vertexArr._arr
 @group(0) @binding(2) var<storage, read_write> vert_tet: array<u32>; // vertexTetArr - position-indexed!
-@group(0) @binding(3) var<storage, read> tet_to_vert: array<u32>; // which insertion is splitting each tet
+@group(0) @binding(3) var<storage, read> tet_to_vert: array<u32>; // position in uninserted array for each splitting tet
 @group(0) @binding(4) var<storage, read> tets: array<vec4<u32>>;
 @group(0) @binding(5) var<storage, read> free_arr: array<u32>;
-@group(0) @binding(6) var<storage, read> insert_list: array<vec2<u32>>; // to get split vertex
-@group(0) @binding(7) var<uniform> params: vec4<u32>; // x = num_uninserted
+@group(0) @binding(6) var<uniform> params: vec4<u32>; // x = num_uninserted
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const INT_MAX: u32 = 0xFFFFFFFFu;
@@ -73,11 +72,18 @@ fn split_points(
     // Line 217: int tetIdx = vertexTetArr[ vertIdx ];
     var tet_idx = vert_tet[idx];
 
+    // Line 219 CUDA: if ( doFast && tetIdx < 0 ) continue;
+    // In unsigned world, INVALID (0xFFFFFFFF) represents inserted vertices
+    if tet_idx == INVALID {
+        return; // Vertex is already inserted
+    }
+
     // Line 226: const int splitVertIdx = tetToVert[ tetIdx ];
-    let split_vert_idx = tet_to_vert[tet_idx];
+    // splitVertIdx is the POSITION in uninserted array
+    let split_position = tet_to_vert[tet_idx];
 
     // Line 230-234: if ( splitVertIdx == INT_MAX ) ... continue
-    if split_vert_idx == INT_MAX {
+    if split_position == INT_MAX {
         return; // Vertex's tetra will not be split in this round
     }
 
@@ -85,8 +91,7 @@ fn split_points(
     let vertex = uninserted[idx];
     let pt_vertex = points[vertex].xyz;
 
-    // split_vert_idx is position in insert_list, get actual split vertex
-    let split_position = insert_list[split_vert_idx].y;
+    // Line 239: const int splitVertex = vertexArr._arr[ splitVertIdx ];
     let split_vertex = uninserted[split_position];
 
     let tet = tets[tet_idx];
@@ -124,12 +129,16 @@ fn split_points(
     }
 
     // Lines 272-277: face is now 7-10, map to actual tet index
+    // Line 272 CUDA: if ( face >= 0 ) - only update if valid
+    // In CUDA, negative face means exact computation needed (orient == 0)
     // face 7 → freeArr[freeIdx - 0]
     // face 8 → freeArr[freeIdx - 1]
     // face 9 → freeArr[freeIdx - 2]
     // face 10 → freeArr[freeIdx - 3]
-    let new_tet_idx = free_arr[free_idx - (face - 7u)];
-
-    // Line 279: vertexTetArr[ vertIdx ] = face;
-    vert_tet[idx] = new_tet_idx;
+    if face >= 7u && face <= 10u {
+        let new_tet_idx = free_arr[free_idx - (face - 7u)];
+        // Line 279: vertexTetArr[ vertIdx ] = face;
+        vert_tet[idx] = new_tet_idx;
+    }
+    // else: keep current vert_tet value (exact computation will be needed)
 }

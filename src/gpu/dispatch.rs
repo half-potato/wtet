@@ -80,6 +80,28 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 
+    /// Dispatch negate inserted verts (mark vertices that won their tets as inserted).
+    pub fn dispatch_negate_inserted_verts(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.negate_inserted_verts_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("negate_inserted_verts"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.negate_inserted_verts_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.negate_inserted_verts_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+    }
+
     /// Dispatch build insert list (scans tets to build insert_list from tet_vert winners).
     pub fn dispatch_build_insert_list(
         &self,
@@ -123,6 +145,28 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
     }
 
+    /// Dispatch mark tet empty (set empty flag on all tets before split).
+    pub fn dispatch_mark_tet_empty(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_tets: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.mark_tet_empty_params,
+            0,
+            bytemuck::cast_slice(&[num_tets, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("mark_tet_empty"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.mark_tet_empty_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.mark_tet_empty_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_tets, 64), 1, 1);
+    }
+
     /// Dispatch split points (update vert_tet for vertices whose tets are splitting).
     pub fn dispatch_split_points(
         &self,
@@ -164,6 +208,28 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.split_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.split_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
+    }
+
+    /// Dispatch split fixup (fix adjacency for concurrent splits).
+    pub fn dispatch_split_fixup(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_insertions: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.split_fixup_params,
+            0,
+            bytemuck::cast_slice(&[num_insertions, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("split_fixup"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.split_fixup_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.split_fixup_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
     }
 

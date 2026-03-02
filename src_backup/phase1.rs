@@ -47,8 +47,8 @@ pub async fn run(
         // Encode the insertion pipeline
         let mut encoder = device.create_command_encoder(&Default::default());
 
-        // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
-        state.dispatch_reset_votes(&mut encoder, queue, num_uninserted);
+        // 1. Reset votes
+        state.dispatch_reset_votes(&mut encoder);
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
@@ -59,27 +59,15 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 3. Vote (each vertex votes for its tet)
+        // 3. Vote
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_vote(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 4. Pick winners (determine winning vertex per tet)
+        // 4. Pick winners
         let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_pick_winner(&mut encoder, queue, num_uninserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-
-        // 4b. Mark inserted vertices (CUDA: kerNegateInsertedVerts)
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_negate_inserted_verts(&mut encoder, queue, num_uninserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-
-        // 5. Build insert list from winners
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_build_insert_list(&mut encoder, queue);
+        state.dispatch_pick_winner(&mut encoder, queue);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
@@ -87,23 +75,12 @@ pub async fn run(
         let counters = state.buffers.read_counters(device, queue).await;
         let num_inserted = counters.inserted_count;
 
-        println!("[DEBUG] Iteration {}: num_inserted = {}", iteration, num_inserted);
-
         if num_inserted == 0 {
-            // Debug: Read back vert_tet and tet_vert to see why no winners
-            println!("[DEBUG] No winners found! Investigating...");
-            println!("[DEBUG] Remaining uninserted: {:?}", state.uninserted);
-
             log::warn!("No points inserted in iteration {} — breaking", iteration);
             break;
         }
 
-        println!(
-            "[DEBUG] Iteration {}: Inserting {} points (uninserted before removal: {})",
-            iteration,
-            num_inserted,
-            num_uninserted
-        );
+        log::debug!("Inserting {} points", num_inserted);
 
         // 5a. Mark split (for concurrent split detection)
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -111,29 +88,11 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 5b. Mark all tets as empty (CUDA: kerMarkTetEmpty before split)
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_mark_tet_empty(&mut encoder, queue, state.max_tets);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-
-        // 5c. Split points (update vert_tet for vertices whose tets are splitting)
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_split_points(&mut encoder, queue, num_uninserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-
-        // 5d. Split
+        // 5b. Split
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split(&mut encoder, queue, num_inserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
-
-        // 5e. Split fixup (DISABLED - split.wgsl handles adjacency inline)
-        // let mut encoder = device.create_command_encoder(&Default::default());
-        // state.dispatch_split_fixup(&mut encoder, queue, num_inserted);
-        // queue.submit(Some(encoder.finish()));
-        // device.poll(wgpu::Maintain::Wait);
 
         // Note: We don't update vert_tet here because it will be done at the start of the next iteration
 
@@ -177,8 +136,8 @@ pub async fn run(
             .uninserted
             .retain(|v| !inserted_set.contains(v));
 
-        println!(
-            "[DEBUG] After iteration {}: {} points remaining",
+        log::debug!(
+            "After iteration {}: {} points remaining",
             iteration,
             state.uninserted.len()
         );
@@ -192,19 +151,11 @@ pub async fn run(
         device.poll(wgpu::Maintain::Wait);
     }
 
-    if !state.uninserted.is_empty() {
-        println!(
-            "[WARNING] Phase 1 complete after {} iterations, {} points FAILED to insert: {:?}",
-            iteration,
-            state.uninserted.len(),
-            state.uninserted
-        );
-    } else {
-        println!(
-            "[INFO] Phase 1 complete after {} iterations, all points inserted",
-            iteration
-        );
-    }
+    log::info!(
+        "Phase 1 complete after {} iterations, {} points remaining",
+        iteration,
+        state.uninserted.len()
+    );
 }
 
 /// Read back the vertex indices that were inserted this iteration.
@@ -218,17 +169,11 @@ async fn read_inserted_verts(
         return Vec::new();
     }
 
-    // insert_list is vec2<u32> (tet_idx, position) — pair[1] is position in uninserted array
+    // insert_list is vec2<u32> (tet_idx, vert_idx) — we want the vert_idx
     let raw: Vec<[u32; 2]> = state
         .buffers
         .read_buffer_as(device, queue, &state.buffers.insert_list, count)
         .await;
 
-    // Convert positions to actual vertex indices
-    raw.iter()
-        .map(|pair| {
-            let position = pair[1] as usize;
-            state.uninserted[position]
-        })
-        .collect()
+    raw.iter().map(|pair| pair[1]).collect()
 }

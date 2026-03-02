@@ -26,11 +26,54 @@ fn dist_to_centroid(tet: vec4<u32>, vert: u32) -> f32 {
     return length(diff);
 }
 
-// Compute insphere determinant (simplified - exact arithmetic needed for production)
+// Compute insphere determinant
+// Port of insphereDet from gDel3D/GPU/KerShewchuk.h (lines 1683-1755)
+// Returns the negative determinant (matching CUDA convention)
 fn in_sphere_det(tet: vec4<u32>, vert: u32) -> f32 {
-    // TODO: This should use exact arithmetic like the original
-    // For now, use a simple distance metric
-    return dist_to_centroid(tet, vert);
+    // Get the 5 points: tet vertices + test point
+    let pa = points[tet.x].xyz;
+    let pb = points[tet.y].xyz;
+    let pc = points[tet.z].xyz;
+    let pd = points[tet.w].xyz;
+    let pe = points[vert].xyz;
+
+    // Translate all points relative to pe (lines 1700-1711)
+    let aex = pa.x - pe.x;
+    let aey = pa.y - pe.y;
+    let aez = pa.z - pe.z;
+    let bex = pb.x - pe.x;
+    let bey = pb.y - pe.y;
+    let bez = pb.z - pe.z;
+    let cex = pc.x - pe.x;
+    let cey = pc.y - pe.y;
+    let cez = pc.z - pe.z;
+    let dex = pd.x - pe.x;
+    let dey = pd.y - pe.y;
+    let dez = pd.z - pe.z;
+
+    // Compute lifted coordinates (lines 1713-1716)
+    let alift = aex * aex + aey * aey + aez * aez;
+    let blift = bex * bex + bey * bey + bez * bez;
+    let clift = cex * cex + cey * cey + cez * cez;
+    let dlift = dex * dex + dey * dey + dez * dez;
+
+    // Compute 2x2 minors (lines 1718-1741)
+    let ab = aex * bey - bex * aey;
+    let bc = bex * cey - cex * bey;
+    let cd = cex * dey - dex * cey;
+    let da = dex * aey - aex * dey;
+    let ac = aex * cey - cex * aey;
+    let bd = bex * dey - dex * bey;
+
+    // Compute the determinant (lines 1743-1746)
+    let det = (cd * blift - bd * clift + bc * dlift) * aez
+            + (-cd * alift - da * clift - ac * dlift) * bez
+            + (bd * alift + da * blift + ab * dlift) * cez
+            + (-bc * alift + ac * blift - ab * clift) * dez;
+
+    // Return negated determinant to match CUDA convention (line 898)
+    // CUDA: det = -insphereDet(...)
+    return -det;
 }
 
 // Simple hash function for random insertion
@@ -58,6 +101,13 @@ fn vote_for_point(
 
     // Lines 164-168: EXACT MATCH to original
     let tet_idx = vert_tet[idx];              // Line 166: vertexTetArr[idx]
+
+    // Skip if vertex is already inserted (tet_idx == INVALID after negate_inserted_verts)
+    const INVALID: u32 = 0xFFFFFFFFu;
+    if tet_idx == INVALID {
+        return;
+    }
+
     let tet = tets[tet_idx];                  // Line 167: tetArr[tetIdx]
     let vert = uninserted[idx];               // Line 168: vertexArr._arr[idx]
     var sval: f32;

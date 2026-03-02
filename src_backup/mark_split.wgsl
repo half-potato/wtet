@@ -5,7 +5,7 @@
 //
 // This shader reads the insert_list and marks each tet with the vertex being inserted.
 
-@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, position)
+@group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
 @group(0) @binding(1) var<storage, read_write> tet_to_vert: array<u32>;
 @group(0) @binding(2) var<uniform> params: vec4<u32>; // x = num_insertions
 
@@ -22,8 +22,7 @@ fn mark_split(
 
     let insert = insert_list[idx];
     let tet_idx = insert.x;
-    let position = insert.y;
-    // Store the POSITION in uninserted array (not insertion index!)
-    // This matches original CUDA: tetToVert[tetIdx] stores position in vertexArr
-    tet_to_vert[tet_idx] = position;
+    let vert_idx = insert.y;
+
+    tet_to_vert[tet_idx] = vert_idx;
 }

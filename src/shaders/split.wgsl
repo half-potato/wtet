@@ -145,8 +145,8 @@ fn split_tetra(
             set_opp_at(nei_tet_idx, nei_tet_vi, make_opp_val(new_tet_idx_0, 3u));
         } else {
             // Lines 152-160: Neighbour has split
-            let nei_split_pos = insert_list[nei_split_idx].y;
-            let nei_split_vert = uninserted[nei_split_pos];
+            // tet_to_vert now stores position directly (not insertion index)
+            let nei_split_vert = uninserted[nei_split_idx];
             let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
             nei_tet_idx = free_arr[nei_free_idx - nei_tet_vi];
             nei_tet_vi = 3u;
@@ -186,8 +186,8 @@ fn split_tetra(
         if nei_split_idx == INT_MAX {
             set_opp_at(nei_tet_idx, nei_tet_vi, make_opp_val(new_tet_idx_1, 3u));
         } else {
-            let nei_split_pos = insert_list[nei_split_idx].y;
-            let nei_split_vert = uninserted[nei_split_pos];
+            // tet_to_vert now stores position directly (not insertion index)
+            let nei_split_vert = uninserted[nei_split_idx];
             let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
             nei_tet_idx = free_arr[nei_free_idx - nei_tet_vi];
             nei_tet_vi = 3u;
@@ -224,8 +224,8 @@ fn split_tetra(
         if nei_split_idx == INT_MAX {
             set_opp_at(nei_tet_idx, nei_tet_vi, make_opp_val(new_tet_idx_2, 3u));
         } else {
-            let nei_split_pos = insert_list[nei_split_idx].y;
-            let nei_split_vert = uninserted[nei_split_pos];
+            // tet_to_vert now stores position directly (not insertion index)
+            let nei_split_vert = uninserted[nei_split_idx];
             let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
             nei_tet_idx = free_arr[nei_free_idx - nei_tet_vi];
             nei_tet_vi = 3u;
@@ -262,8 +262,8 @@ fn split_tetra(
         if nei_split_idx == INT_MAX {
             set_opp_at(nei_tet_idx, nei_tet_vi, make_opp_val(new_tet_idx_3, 3u));
         } else {
-            let nei_split_pos = insert_list[nei_split_idx].y;
-            let nei_split_vert = uninserted[nei_split_pos];
+            // tet_to_vert now stores position directly (not insertion index)
+            let nei_split_vert = uninserted[nei_split_idx];
             let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
             nei_tet_idx = free_arr[nei_free_idx - nei_tet_vi];
             nei_tet_vi = 3u;
