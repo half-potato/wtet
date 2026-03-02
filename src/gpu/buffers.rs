@@ -48,6 +48,30 @@ pub struct GpuBuffers {
     /// Staging buffer for readback
     pub staging: wgpu::Buffer,
 
+    // --- New buffers for missing kernels ---
+    /// FlipItem array: vec4<i32> × (max_tets * 2) - stored as pairs of vec4
+    pub flip_arr: wgpu::Buffer,
+    /// Tet message array for concurrent flip detection: vec2<i32> × max_tets
+    pub tet_msg_arr: wgpu::Buffer,
+    /// Encoded face vertex indices: i32 × max_tets
+    pub encoded_face_vi_arr: wgpu::Buffer,
+    /// Tet to flip trace chain: i32 × max_tets
+    pub tet_to_flip: wgpu::Buffer,
+    /// Scatter array for reordering: u32 × (num_points + 4)
+    pub scatter_arr: wgpu::Buffer,
+    /// Order array for reordering: u32 × max_tets
+    pub order_arr: wgpu::Buffer,
+    /// Inserted vertices array: u32 × max_tets
+    pub ins_vert_vec: wgpu::Buffer,
+    /// Reverse mapping array: u32 × max_tets
+    pub rev_map_arr: wgpu::Buffer,
+    /// Active tet vector for flipping: i32 × max_tets
+    pub act_tet_vec: wgpu::Buffer,
+    /// Vote array for flips: i32 × max_tets
+    pub vote_arr: wgpu::Buffer,
+    /// Flip to tet mapping (compacted output): i32 × max_tets
+    pub flip_to_tet: wgpu::Buffer,
+
     // Debug buffers
     /// Breadcrumbs: u32 per thread (marks progress through shader)
     pub breadcrumbs: wgpu::Buffer,
@@ -279,6 +303,84 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        // --- New buffers for missing kernels ---
+        let flip_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flip_arr"),
+            size: (max_tets as u64) * 2 * 16, // FlipItem = 2 * vec4<i32> = 32 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let tet_msg_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tet_msg_arr"),
+            size: (max_tets as u64) * 8, // vec2<i32> = 8 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let encoded_face_vi_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("encoded_face_vi_arr"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let tet_to_flip = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("tet_to_flip"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let scatter_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scatter_arr"),
+            size: ((num_points + 4) as u64) * 4, // u32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let order_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("order_arr"),
+            size: (max_tets as u64) * 4, // u32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let ins_vert_vec = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("ins_vert_vec"),
+            size: (max_tets as u64) * 4, // u32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let rev_map_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("rev_map_arr"),
+            size: (max_tets as u64) * 4, // u32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let act_tet_vec = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("act_tet_vec"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let vote_arr = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vote_arr"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let flip_to_tet = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flip_to_tet"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
         Self {
             points: points_buf,
             tets,
@@ -301,6 +403,17 @@ impl GpuBuffers {
             prefix_sum_data,
             prefix_sum_blocks,
             staging,
+            flip_arr,
+            tet_msg_arr,
+            encoded_face_vi_arr,
+            tet_to_flip,
+            scatter_arr,
+            order_arr,
+            ins_vert_vec,
+            rev_map_arr,
+            act_tet_vec,
+            vote_arr,
+            flip_to_tet,
             breadcrumbs,
             thread_debug,
             update_debug,

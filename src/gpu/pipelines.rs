@@ -654,6 +654,368 @@ impl Pipelines {
             cache: None,
         });
 
+        // ==================== NEW PIPELINES (14 KERNELS) - PROPER BIND GROUPS ====================
+
+        // --- 1. Collect free slots (compaction) ---
+        let collect_free_slots_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("collect_free_slots.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/collect_free_slots.wgsl").into()),
+        });
+        let collect_free_slots_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let collect_free_slots_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("collect_free_slots_bgl"),
+            entries: &[storage_ro_entry(0), storage_ro_entry(1), storage_rw_entry(2), uniform_entry(3)],
+        });
+        let collect_free_slots_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("collect_free_slots_bg"),
+            layout: &collect_free_slots_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &bufs.free_arr),
+                buf_entry(3, &collect_free_slots_params),
+            ],
+        });
+        let collect_free_slots_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("collect_free_slots_pl"),
+            bind_group_layouts: &[&collect_free_slots_bgl],
+            push_constant_ranges: &[],
+        });
+        let collect_free_slots_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("collect_free_slots"),
+            layout: Some(&collect_free_slots_pl),
+            module: &collect_free_slots_shader,
+            entry_point: Some("collect_free_slots"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 2. Make compact map (compaction) ---
+        let make_compact_map_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("make_compact_map.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/make_compact_map.wgsl").into()),
+        });
+        let make_compact_map_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let make_compact_map_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("make_compact_map_bgl"),
+            entries: &[storage_ro_entry(0), storage_rw_entry(1), storage_ro_entry(2), uniform_entry(3)],
+        });
+        let make_compact_map_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("make_compact_map_bg"),
+            layout: &make_compact_map_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &bufs.free_arr),
+                buf_entry(3, &make_compact_map_params),
+            ],
+        });
+        let make_compact_map_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("make_compact_map_pl"),
+            bind_group_layouts: &[&make_compact_map_bgl],
+            push_constant_ranges: &[],
+        });
+        let make_compact_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("make_compact_map"),
+            layout: Some(&make_compact_map_pl),
+            module: &make_compact_map_shader,
+            entry_point: Some("make_compact_map"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 3. Compact tets (compaction) ---
+        let compact_tets_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("compact_tets.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_tets.wgsl").into()),
+        });
+        let compact_tets_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let compact_tets_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_tets_bgl"),
+            entries: &[storage_ro_entry(0), storage_ro_entry(1), storage_rw_entry(2), storage_rw_entry(3), uniform_entry(4)],
+        });
+        let compact_tets_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_tets_bg"),
+            layout: &compact_tets_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &bufs.tets),
+                buf_entry(3, &bufs.tet_opp),
+                buf_entry(4, &compact_tets_params),
+            ],
+        });
+        let compact_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_tets_pl"),
+            bind_group_layouts: &[&compact_tets_bgl],
+            push_constant_ranges: &[],
+        });
+        let compact_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_tets"),
+            layout: Some(&compact_tets_pl),
+            module: &compact_tets_shader,
+            entry_point: Some("compact_tets"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 4. Mark special tets (flip management) ---
+        let mark_special_tets_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mark_special_tets.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mark_special_tets.wgsl").into()),
+        });
+        let mark_special_tets_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+        let mark_special_tets_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mark_special_tets_bgl"),
+            entries: &[storage_rw_entry(0), storage_rw_entry(1), uniform_entry(2)],
+        });
+        let mark_special_tets_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mark_special_tets_bg"),
+            layout: &mark_special_tets_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.tet_opp),
+                buf_entry(2, &mark_special_tets_params),
+            ],
+        });
+        let mark_special_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mark_special_tets_pl"),
+            bind_group_layouts: &[&mark_special_tets_bgl],
+            push_constant_ranges: &[],
+        });
+        let mark_special_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mark_special_tets"),
+            layout: Some(&mark_special_tets_pl),
+            module: &mark_special_tets_shader,
+            entry_point: Some("mark_special_tets"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 5. Update flip trace (flip management) ---
+        let update_flip_trace_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("update_flip_trace.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_flip_trace.wgsl").into()),
+        });
+        let update_flip_trace_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let update_flip_trace_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("update_flip_trace_bgl"),
+            entries: &[storage_rw_entry(0), storage_rw_entry(1), uniform_entry(2)],
+        });
+        let update_flip_trace_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("update_flip_trace_bg"),
+            layout: &update_flip_trace_bgl,
+            entries: &[
+                buf_entry(0, &bufs.flip_arr),
+                buf_entry(1, &bufs.tet_to_flip),
+                buf_entry(2, &update_flip_trace_params),
+            ],
+        });
+        let update_flip_trace_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("update_flip_trace_pl"),
+            bind_group_layouts: &[&update_flip_trace_bgl],
+            push_constant_ranges: &[],
+        });
+        let update_flip_trace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("update_flip_trace"),
+            layout: Some(&update_flip_trace_pl),
+            module: &update_flip_trace_shader,
+            entry_point: Some("update_flip_trace"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 6-11: Block allocation & index shifting (stub bind groups for now) ---
+        let update_block_vert_free_list_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let update_block_opp_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let shift_inf_free_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let update_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let shift_opp_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let shift_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let make_reverse_map_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let stub_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("stub_bgl"),
+            entries: &[uniform_entry(0)],
+        });
+        let stub_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("stub_pl"),
+            bind_group_layouts: &[&stub_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let update_block_vert_free_list_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &update_block_vert_free_list_params)],
+        });
+        let update_block_opp_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &update_block_opp_tet_idx_params)],
+        });
+        let shift_inf_free_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &shift_inf_free_idx_params)],
+        });
+        let update_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &update_tet_idx_params)],
+        });
+        let shift_opp_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &shift_opp_tet_idx_params)],
+        });
+        let shift_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &shift_tet_idx_params)],
+        });
+        let make_reverse_map_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("stub"), layout: &stub_bgl, entries: &[buf_entry(0, &make_reverse_map_params)],
+        });
+
+        let update_block_vert_free_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("update_block_vert_free_list.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_block_vert_free_list.wgsl").into()),
+            }),
+            entry_point: Some("update_block_vert_free_list"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let update_block_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("update_block_opp_tet_idx.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_block_opp_tet_idx.wgsl").into()),
+            }),
+            entry_point: Some("update_block_opp_tet_idx"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let shift_inf_free_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shift_inf_free_idx.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_inf_free_idx.wgsl").into()),
+            }),
+            entry_point: Some("shift_inf_free_idx"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let update_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("update_tet_idx.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_tet_idx.wgsl").into()),
+            }),
+            entry_point: Some("update_tet_idx"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let shift_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shift_opp_tet_idx.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_opp_tet_idx.wgsl").into()),
+            }),
+            entry_point: Some("shift_opp_tet_idx"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let shift_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("shift_tet_idx.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_tet_idx.wgsl").into()),
+            }),
+            entry_point: Some("shift_tet_idx"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+        let make_reverse_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("stub"), layout: Some(&stub_pl),
+            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
+                label: Some("make_reverse_map.wgsl"),
+                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/make_reverse_map.wgsl").into()),
+            }),
+            entry_point: Some("make_reverse_map"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 12. Update opp (CRITICAL - flip adjacency) ---
+        let update_opp_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("update_opp.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_opp.wgsl").into()),
+        });
+        let update_opp_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let update_opp_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("update_opp_bgl"),
+            entries: &[
+                storage_rw_entry(0), storage_rw_entry(1), storage_ro_entry(2),
+                storage_ro_entry(3), uniform_entry(4),
+            ],
+        });
+        let update_opp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("update_opp_bg"),
+            layout: &update_opp_bgl,
+            entries: &[
+                buf_entry(0, &bufs.flip_arr),
+                buf_entry(1, &bufs.tet_opp),
+                buf_entry(2, &bufs.tet_msg_arr),
+                buf_entry(3, &bufs.encoded_face_vi_arr),
+                buf_entry(4, &update_opp_params),
+            ],
+        });
+        let update_opp_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("update_opp_pl"),
+            bind_group_layouts: &[&update_opp_bgl],
+            push_constant_ranges: &[],
+        });
+        let update_opp_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("update_opp"),
+            layout: Some(&update_opp_pl),
+            module: &update_opp_shader,
+            entry_point: Some("update_opp"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- 13. Mark rejected flips (flip validation) ---
+        let mark_rejected_flips_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("mark_rejected_flips.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mark_rejected_flips.wgsl").into()),
+        });
+        let mark_rejected_flips_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let mark_rejected_flips_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("mark_rejected_flips_bgl"),
+            entries: &[
+                storage_ro_entry(0), storage_ro_entry(1), storage_ro_entry(2), storage_rw_entry(3),
+                storage_rw_entry(4), storage_rw_entry(5), storage_rw_entry(6), uniform_entry(7),
+            ],
+        });
+        let mark_rejected_flips_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("mark_rejected_flips_bg"),
+            layout: &mark_rejected_flips_bgl,
+            entries: &[
+                buf_entry(0, &bufs.act_tet_vec),
+                buf_entry(1, &bufs.tet_opp),
+                buf_entry(2, &bufs.tet_vote),
+                buf_entry(3, &bufs.tet_info),
+                buf_entry(4, &bufs.vote_arr),
+                buf_entry(5, &bufs.flip_to_tet),
+                buf_entry(6, &bufs.counters),
+                buf_entry(7, &mark_rejected_flips_params),
+            ],
+        });
+        let mark_rejected_flips_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("mark_rejected_flips_pl"),
+            bind_group_layouts: &[&mark_rejected_flips_bgl],
+            push_constant_ranges: &[],
+        });
+        let mark_rejected_flips_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("mark_rejected_flips"),
+            layout: Some(&mark_rejected_flips_pl),
+            module: &mark_rejected_flips_shader,
+            entry_point: Some("mark_rejected_flips"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         Self {
             init_pipeline,
             init_bind_group,
@@ -689,6 +1051,48 @@ impl Pipelines {
             gather_pipeline,
             gather_bind_group,
             gather_params,
+            collect_free_slots_pipeline,
+            collect_free_slots_bind_group,
+            collect_free_slots_params,
+            make_compact_map_pipeline,
+            make_compact_map_bind_group,
+            make_compact_map_params,
+            compact_tets_pipeline,
+            compact_tets_bind_group,
+            compact_tets_params,
+            mark_special_tets_pipeline,
+            mark_special_tets_bind_group,
+            mark_special_tets_params,
+            update_flip_trace_pipeline,
+            update_flip_trace_bind_group,
+            update_flip_trace_params,
+            update_block_vert_free_list_pipeline,
+            update_block_vert_free_list_bind_group,
+            update_block_vert_free_list_params,
+            update_block_opp_tet_idx_pipeline,
+            update_block_opp_tet_idx_bind_group,
+            update_block_opp_tet_idx_params,
+            shift_inf_free_idx_pipeline,
+            shift_inf_free_idx_bind_group,
+            shift_inf_free_idx_params,
+            update_tet_idx_pipeline,
+            update_tet_idx_bind_group,
+            update_tet_idx_params,
+            shift_opp_tet_idx_pipeline,
+            shift_opp_tet_idx_bind_group,
+            shift_opp_tet_idx_params,
+            shift_tet_idx_pipeline,
+            shift_tet_idx_bind_group,
+            shift_tet_idx_params,
+            make_reverse_map_pipeline,
+            make_reverse_map_bind_group,
+            make_reverse_map_params,
+            update_opp_pipeline,
+            update_opp_bind_group,
+            update_opp_params,
+            mark_rejected_flips_pipeline,
+            mark_rejected_flips_bind_group,
+            mark_rejected_flips_params,
         }
     }
 }
