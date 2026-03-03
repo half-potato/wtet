@@ -32,6 +32,10 @@ pub struct Pipelines {
     pub mark_split_bind_group: wgpu::BindGroup,
     pub mark_split_params: wgpu::Buffer,
 
+    // Pipeline: split points (updates vert_tet for uninserted vertices whose tets are splitting)
+    pub split_points_pipeline: wgpu::ComputePipeline,
+    pub split_points_bind_group: wgpu::BindGroup,
+
     // Pipeline: split tetra
     pub split_pipeline: wgpu::ComputePipeline,
     pub split_bind_group: wgpu::BindGroup,
@@ -399,6 +403,62 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- Split points pipeline ---
+        let split_points_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("split_points.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(
+                include_str!("../shaders/split_points.wgsl").into(),
+            ),
+        });
+
+        let split_points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("split_points_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // points
+                storage_ro_entry(1),  // tets
+                storage_ro_entry(2),  // tet_opp
+                storage_ro_entry(3),  // tet_info
+                storage_rw_entry(4),  // vert_tet
+                storage_ro_entry(5),  // free_arr
+                storage_ro_entry(6),  // vert_free_arr
+                storage_rw_entry(7),  // counters
+                storage_ro_entry(8),  // uninserted
+                storage_ro_entry(9),  // tet_to_vert
+            ],
+        });
+
+        let split_points_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("split_points_bg"),
+            layout: &split_points_bgl,
+            entries: &[
+                buf_entry(0, &bufs.points),
+                buf_entry(1, &bufs.tets),
+                buf_entry(2, &bufs.tet_opp),
+                buf_entry(3, &bufs.tet_info),
+                buf_entry(4, &bufs.vert_tet),
+                buf_entry(5, &bufs.free_arr),
+                buf_entry(6, &bufs.vert_free_arr),
+                buf_entry(7, &bufs.counters),
+                buf_entry(8, &bufs.uninserted),
+                buf_entry(9, &bufs.tet_to_vert),
+            ],
+        });
+
+        let split_points_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("split_points_pl"),
+            bind_group_layouts: &[&split_points_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let split_points_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("split_points"),
+            layout: Some(&split_points_pl),
+            module: &split_points_shader,
+            entry_point: Some("main"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- Split pipeline ---
         let split_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("split.wgsl"),
@@ -577,7 +637,6 @@ impl Pipelines {
             push_constant_ranges: &[],
         });
 
-        eprintln!("    About to call device.create_compute_pipeline...");
         let flip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("flip"),
             layout: Some(&flip_pl),
@@ -1390,7 +1449,6 @@ impl Pipelines {
             cache: None,
         });
 
-        eprintln!("[PIPELINES] ✓ All pipelines created successfully");
 
         Self {
             init_pipeline,
@@ -1411,6 +1469,8 @@ impl Pipelines {
             mark_split_pipeline,
             mark_split_bind_group,
             mark_split_params,
+            split_points_pipeline,
+            split_points_bind_group,
             split_pipeline,
             split_bind_group,
             split_params,

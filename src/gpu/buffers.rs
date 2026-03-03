@@ -159,18 +159,27 @@ impl GpuBuffers {
             usage: storage_rw,
         });
 
-        // Initialize free_arr to match CUDA's _freeVec.resize(TetMax) approach
-        // Use entire max_tets pool, not per-vertex blocks
+        // Initialize free_arr with block-based allocation (per-vertex blocks)
+        // Each vertex gets MEAN_VERTEX_DEGREE (8) tet slots
+        // Vertex V's slots are at free_arr[V*8 .. V*8+7]
+        // Port of CUDA's block allocation scheme (see kerSplitTetra line 120, kerUpdateBlockVertFreeList)
         let free_arr_size = max_tets as usize;
         let mut free_data = vec![0u32; free_arr_size];
 
-        // Initialize free slots: indices 1..max_tets-1 (tet 0 is initial super-tet)
-        for i in 1..max_tets {
-            free_data[i as usize] = i;
+        // Calculate how many vertices can be supported with current max_tets
+        let max_vertex_blocks = max_tets / MEAN_VERTEX_DEGREE;
+
+        // Initialize free slots for each vertex block
+        // Vertex V gets tet indices [V*8, V*8+1, ..., V*8+7]
+        for v in 0..max_vertex_blocks {
+            let base = v * MEAN_VERTEX_DEGREE;
+            for slot in 0..MEAN_VERTEX_DEGREE {
+                free_data[(base + slot) as usize] = base + slot;
+            }
         }
 
-        eprintln!("[BUFFERS] free_arr: size={}, initialized with indices 1..{}",
-                  free_arr_size, max_tets);
+        eprintln!("[BUFFERS] free_arr: block-based allocation for {} vertex blocks ({} tets total)",
+                  max_vertex_blocks, max_tets);
 
         // Initialize vert_free_arr: per-vertex free slot counts
         // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots initially

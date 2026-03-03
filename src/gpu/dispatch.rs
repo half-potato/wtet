@@ -101,6 +101,22 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
     }
 
+    /// Dispatch split_points (updates vert_tet for uninserted vertices whose tets are splitting).
+    pub fn dispatch_split_points(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        _queue: &wgpu::Queue,
+        num_uninserted: u32,
+    ) {
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("split_points"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.split_points_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.split_points_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+    }
+
     /// Dispatch split tetra.
     pub fn dispatch_split(
         &self,

@@ -41,6 +41,24 @@ pub async fn run(
         // Upload current uninserted list
         state.buffers.upload_uninserted(queue, &state.uninserted);
 
+        // Debug: Check vert_tet at start of iteration
+        if iteration == 2 {
+            let vert_tet_debug: Vec<u32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.vert_tet, state.uninserted.len())
+                .await;
+            println!("[DEBUG] Iteration 2 start: vert_tet = {:?}", vert_tet_debug);
+        }
+
+        // Expand tetrahedron list to make room for new insertions
+        // Port of expandTetraList() call from GpuDelaunay.cu:844
+        {
+            let mut encoder = device.create_command_encoder(&Default::default());
+            state.expand_tetra_list(&mut encoder, queue, num_uninserted);
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::Maintain::Wait);
+        }
+
         // Reset counters for this iteration
         state.reset_inserted_counter(queue);
 
@@ -58,6 +76,15 @@ pub async fn run(
         state.dispatch_locate(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
+
+        // Debug: Check vert_tet after locate
+        if iteration == 2 {
+            let vert_tet_after_locate: Vec<u32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.vert_tet, state.uninserted.len())
+                .await;
+            println!("[DEBUG] Iteration 2 after locate: vert_tet = {:?}", vert_tet_after_locate);
+        }
 
         // 3. Vote (each vertex votes for its tet)
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -94,18 +121,26 @@ pub async fn run(
         );
 
         // 5a. Mark split (for concurrent split detection)
-        // TEMPORARILY DISABLED TO ISOLATE SEGFAULT
-        // let mut encoder = device.create_command_encoder(&Default::default());
-        // state.dispatch_mark_split(&mut encoder, queue, num_inserted);
-        // queue.submit(Some(encoder.finish()));
-        // device.poll(wgpu::Maintain::Wait);
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_mark_split(&mut encoder, queue, num_inserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
 
         // 5c. Split points (update vert_tet for vertices whose tets are splitting)
-        // TEMPORARILY DISABLED TO ISOLATE SEGFAULT
-        // let mut encoder = device.create_command_encoder(&Default::default());
-        // state.dispatch_split_points(&mut encoder, queue, num_uninserted);
-        // queue.submit(Some(encoder.finish()));
-        // device.poll(wgpu::Maintain::Wait);
+        // Reset scratch counters
+        queue.write_buffer(&state.buffers.counters, 16, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_split_points(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // Debug: Check how many vert_tet updates split_points made
+        if iteration <= 2 {
+            let counters = state.buffers.read_counters(device, queue).await;
+            println!("[DEBUG] Iteration {}: split_points: {} threads entered, {} had valid tet, {} updated",
+                iteration, counters.scratch[1], counters.scratch[2], counters.scratch[0]);
+        }
 
         // 5d. Split
         let mut encoder = device.create_command_encoder(&Default::default());
@@ -204,19 +239,48 @@ pub async fn run(
             device.poll(wgpu::Maintain::Wait);
         }
 
-        // 7. Remove inserted points from uninserted list.
+        // 7. Remove inserted points from uninserted list and compact vert_tet to match.
         // Read back the insert_list to know which vertices were inserted.
         let inserted_verts = read_inserted_verts(device, queue, state, num_inserted as usize).await;
-        let inserted_set: std::collections::HashSet<u32> = inserted_verts.into_iter().collect();
+        let inserted_positions: std::collections::HashSet<usize> = inserted_verts
+            .iter()
+            .filter_map(|v| state.uninserted.iter().position(|u| u == v))
+            .collect();
 
+        // Read back current vert_tet
+        let old_vert_tet: Vec<u32> = state
+            .buffers
+            .read_buffer_as(device, queue, &state.buffers.vert_tet, num_uninserted as usize)
+            .await;
+
+        // Remove inserted vertices from uninserted
         state
             .uninserted
-            .retain(|v| !inserted_set.contains(v));
+            .retain(|v| !inserted_verts.contains(v));
+
+        // Compact vert_tet to match new uninserted array
+        // Old position -> new position (or None if inserted)
+        let mut new_vert_tet = Vec::with_capacity(state.uninserted.len());
+        for (old_pos, &tet_idx) in old_vert_tet.iter().enumerate() {
+            if !inserted_positions.contains(&old_pos) {
+                new_vert_tet.push(tet_idx);
+            }
+        }
+
+        // Write back compacted vert_tet
+        if !new_vert_tet.is_empty() {
+            queue.write_buffer(
+                &state.buffers.vert_tet,
+                0,
+                bytemuck::cast_slice(&new_vert_tet),
+            );
+        }
 
         println!(
-            "[DEBUG] After iteration {}: {} points remaining",
+            "[DEBUG] After iteration {}: {} points remaining, vert_tet compacted: {:?}",
             iteration,
-            state.uninserted.len()
+            state.uninserted.len(),
+            new_vert_tet
         );
     }
 

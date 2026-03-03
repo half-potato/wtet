@@ -12,6 +12,8 @@ pub struct GpuState {
     pub pipelines: Pipelines,
     pub num_points: u32,
     pub max_tets: u32,
+    /// Current number of tets in use (including dead tets)
+    pub current_tet_num: u32,
     /// Points that still need to be inserted (indices into the point array).
     pub uninserted: Vec<u32>,
 }
@@ -28,7 +30,8 @@ impl GpuState {
         eprintln!("[GPU STATE] Input: {} points", num_points);
         // For block-based allocation, need enough tets to fill all vertex blocks
         // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots
-        let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE;
+        // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
+        let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
         // Also consider typical Delaunay tet count (~6.5x points)
         let typical_tets = num_points * 10;
         let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
@@ -65,6 +68,7 @@ impl GpuState {
             pipelines,
             num_points,
             max_tets,
+            current_tet_num: 1, // Start with 1 (super-tet created by init kernel)
             uninserted,
         }
     }
@@ -124,5 +128,46 @@ impl GpuState {
             adjacency,
             failed_verts,
         }
+    }
+
+    /// Expand tetrahedron list to make room for new insertions.
+    /// Port of GpuDel::expandTetraList() from GpuDelaunay.cu:457-606
+    ///
+    /// Allocates space for new tets that will be created during insertion.
+    /// Expands by `num_new_verts * MEAN_VERTEX_DEGREE` slots.
+    pub fn expand_tetra_list(
+        &mut self,
+        _encoder: &mut wgpu::CommandEncoder,
+        _queue: &wgpu::Queue,
+        num_new_verts: u32,
+    ) {
+        let old_tet_num = self.current_tet_num;
+        let ins_extra_space = num_new_verts * MEAN_VERTEX_DEGREE;
+        let new_tet_num = old_tet_num + ins_extra_space;
+
+        eprintln!(
+            "[EXPAND] Expanding tet list: {} → {} (+{} verts × {} = {} tets)",
+            old_tet_num, new_tet_num, num_new_verts, MEAN_VERTEX_DEGREE, ins_extra_space
+        );
+
+        // Check if we have enough pre-allocated space
+        if new_tet_num > self.max_tets {
+            eprintln!(
+                "[EXPAND] WARNING: Requested {} tets exceeds max_tets {}!",
+                new_tet_num, self.max_tets
+            );
+            eprintln!("[EXPAND] Clamping to max_tets. Some insertions may fail.");
+            self.current_tet_num = self.max_tets;
+            return;
+        }
+
+        // Update current capacity
+        self.current_tet_num = new_tet_num;
+
+        eprintln!("[EXPAND] ✓ Expansion complete, current_tet_num = {}", self.current_tet_num);
+
+        // TODO: Implement reordering/shifting logic
+        // For now, we're just tracking capacity. The actual reordering will be added
+        // when we implement the sorting path (lines 477-556 in CUDA GpuDelaunay.cu)
     }
 }
