@@ -90,7 +90,7 @@ fn gather_failed(
             continue;
         }
 
-        let opp_tet_idx = opp_packed >> 2u;
+        let opp_tet_idx = opp_packed >> 5u;
         let opp_face = opp_packed & 3u;
 
         // Only check if our index < neighbour index (avoid double-counting)

@@ -91,7 +91,7 @@ fn locate_points(
                     found = true;
                     break;
                 }
-                tet_idx = neighbour >> 2u;
+                tet_idx = neighbour >> 5u;
                 found = false;
                 break;
             }

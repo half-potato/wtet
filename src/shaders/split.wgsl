@@ -28,17 +28,18 @@
 @group(0) @binding(8) var<storage, read_write> flip_queue: array<u32>; // tets needing flip check
 @group(0) @binding(9) var<storage, read_write> tet_to_vert: array<u32>; // maps old_tet_idx -> vertex being inserted (or INVALID)
 @group(0) @binding(10) var<uniform> params: vec4<u32>; // x = num_insertions
-@group(0) @binding(11) var<storage, read_write> breadcrumbs: array<u32>; // debug: progress tracking
-@group(0) @binding(12) var<storage, read_write> thread_debug: array<vec4<u32>>; // debug: 16 slots per thread
+// NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
+// @group(0) @binding(11) var<storage, read_write> breadcrumbs: array<u32>; // debug: progress tracking
+// @group(0) @binding(12) var<storage, read_write> thread_debug: array<vec4<u32>>; // debug: 16 slots per thread
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
 const TET_CHANGED: u32 = 2u;
 const COUNTER_FREE: u32 = 0u;
 const COUNTER_ACTIVE: u32 = 1u;
-const MEAN_VERTEX_DEGREE: u32 = 64u;
+const MEAN_VERTEX_DEGREE: u32 = 8u;
 
-// Breadcrumb constants for tracking execution
+// Breadcrumb constants for tracking execution (DISABLED)
 const CRUMB_START: u32 = 1u;
 const CRUMB_READ_INSERT: u32 = 2u;
 const CRUMB_AFTER_ALLOC: u32 = 3u;
@@ -49,13 +50,13 @@ const CRUMB_AFTER_MARK_DEAD: u32 = 7u;
 const CRUMB_AFTER_ADJACENCY: u32 = 8u;
 const CRUMB_COMPLETE: u32 = 99u;
 
-// Debug helper functions
+// Debug helper functions (DISABLED - no-ops to stay under buffer limit)
 fn breadcrumb(tid: u32, crumb: u32) {
-    breadcrumbs[tid] = crumb;
+    // breadcrumbs[tid] = crumb;
 }
 
 fn debug_slot(tid: u32, slot: u32, values: vec4<u32>) {
-    thread_debug[tid * 16u + slot] = values;
+    // thread_debug[tid * 16u + slot] = values;
 }
 
 fn encode_opp(tet_idx: u32, face: u32) -> u32 {

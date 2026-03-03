@@ -23,7 +23,9 @@ impl GpuState {
         points: &[[f32; 3]],
         _config: &GDelConfig,
     ) -> Self {
+        eprintln!("\n[GPU STATE] Initializing GpuState...");
         let num_points = points.len() as u32;
+        eprintln!("[GPU STATE] Input: {} points", num_points);
         // For block-based allocation, need enough tets to fill all vertex blocks
         // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots
         let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE;
@@ -45,11 +47,18 @@ impl GpuState {
         gpu_points.push(GpuPoint::new(-big, 4.0 * big, -big));  // n+2
         gpu_points.push(GpuPoint::new(-big, -big, 4.0 * big));  // n+3
 
+        eprintln!("[GPU STATE] Creating buffers...");
         let buffers = GpuBuffers::new(device, &gpu_points, num_points, max_tets);
+        eprintln!("[GPU STATE] ✓ Buffers created");
+
+        eprintln!("[GPU STATE] Creating pipelines...");
         let pipelines = Pipelines::new(device, &buffers, num_points, max_tets);
+        eprintln!("[GPU STATE] ✓ Pipelines created");
 
         // All real points start as uninserted
         let uninserted: Vec<u32> = (0..num_points).collect();
+
+        eprintln!("[GPU STATE] ✓ GpuState initialization complete\n");
 
         Self {
             buffers,

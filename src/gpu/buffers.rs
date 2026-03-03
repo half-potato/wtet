@@ -71,6 +71,8 @@ pub struct GpuBuffers {
     pub vote_arr: wgpu::Buffer,
     /// Flip to tet mapping (compacted output): i32 × max_tets
     pub flip_to_tet: wgpu::Buffer,
+    /// New slot allocation for 2-3 flips: i32 × max_tets
+    pub flip23_new_slot: wgpu::Buffer,
 
     // Debug buffers
     /// Breadcrumbs: u32 per thread (marks progress through shader)
@@ -91,22 +93,30 @@ impl GpuBuffers {
         num_points: u32,
         max_tets: u32,
     ) -> Self {
+        eprintln!("[BUFFERS] Creating GpuBuffers:");
+        eprintln!("  num_points={}, max_tets={}", num_points, max_tets);
+        eprintln!("  MEAN_VERTEX_DEGREE={}", MEAN_VERTEX_DEGREE);
+
         let storage_rw = wgpu::BufferUsages::STORAGE
             | wgpu::BufferUsages::COPY_SRC
             | wgpu::BufferUsages::COPY_DST;
 
+        eprintln!("  Creating points buffer: {} points", points.len());
         let points_buf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("points"),
             contents: bytemuck::cast_slice(points),
             usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
         });
+        eprintln!("  ✓ points: {} bytes", points.len() * 16);
 
+        eprintln!("  Creating core tet buffers (max_tets={}):", max_tets);
         let tets = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tets"),
             size: (max_tets as u64) * 16, // vec4<u32> = 16 bytes
             usage: storage_rw,
             mapped_at_creation: false,
         });
+        eprintln!("    ✓ tets: {} bytes", max_tets * 16);
 
         let tet_opp = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tet_opp"),
@@ -114,6 +124,7 @@ impl GpuBuffers {
             usage: storage_rw,
             mapped_at_creation: false,
         });
+        eprintln!("    ✓ tet_opp: {} bytes", max_tets * 16);
 
         let tet_info = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tet_info"),
@@ -121,6 +132,7 @@ impl GpuBuffers {
             usage: storage_rw,
             mapped_at_creation: false,
         });
+        eprintln!("    ✓ tet_info: {} bytes", max_tets * 4);
 
         let vert_tet = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vert_tet"),
@@ -129,6 +141,7 @@ impl GpuBuffers {
             usage: storage_rw,
             mapped_at_creation: false,
         });
+        eprintln!("    ✓ vert_tet: {} bytes (num_points+4)", (num_points + 4) * 4);
 
         let tet_vote = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tet_vote"),
@@ -136,6 +149,7 @@ impl GpuBuffers {
             usage: storage_rw,
             mapped_at_creation: false,
         });
+        eprintln!("    ✓ tet_vote: {} bytes", max_tets * 4);
 
         // Free stack: initially filled with indices [1..max_tets) since tet 0 is the super-tet
         let free_data: Vec<u32> = (1..max_tets).collect();
@@ -145,34 +159,26 @@ impl GpuBuffers {
             usage: storage_rw,
         });
 
-        // Initialize free_arr with block-based allocation.
-        // Each vertex gets a block of MEAN_VERTEX_DEGREE tet slots.
-        // Distribute available tets across vertex blocks.
-        let num_vertices = (num_points + 4) as usize;
-        let free_arr_size = num_vertices * MEAN_VERTEX_DEGREE as usize;
-        let mut free_data = vec![0xFFFFFFFFu32; free_arr_size];
+        // Initialize free_arr to match CUDA's _freeVec.resize(TetMax) approach
+        // Use entire max_tets pool, not per-vertex blocks
+        let free_arr_size = max_tets as usize;
+        let mut free_data = vec![0u32; free_arr_size];
 
-        // Distribute tets 1..max_tets-1 across vertex blocks
-        // Each vertex gets a contiguous range of tets in their block
-        let mut tet_idx = 1u32; // Start from 1 (tet 0 is super-tet)
-        let mut vert_free_data = vec![0u32; num_vertices];  // Count ACTUAL tets per vertex
-
-        for vertex in 0..num_vertices {
-            let block_start = vertex * MEAN_VERTEX_DEGREE as usize;
-            let block_end = block_start + MEAN_VERTEX_DEGREE as usize;
-
-            let mut count = 0u32;
-            for slot in block_start..block_end {
-                if tet_idx < max_tets {
-                    free_data[slot] = tet_idx;
-                    tet_idx += 1;
-                    count += 1;
-                } else {
-                    break; // No more tets to distribute
-                }
-            }
-            vert_free_data[vertex] = count;  // Store ACTUAL count, not MEAN_VERTEX_DEGREE
+        // Initialize free slots: indices 1..max_tets-1 (tet 0 is initial super-tet)
+        for i in 1..max_tets {
+            free_data[i as usize] = i;
         }
+
+        eprintln!("[BUFFERS] free_arr: size={}, initialized with indices 1..{}",
+                  free_arr_size, max_tets);
+
+        // Initialize vert_free_arr: per-vertex free slot counts
+        // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots initially
+        let num_vertices = (num_points + 4) as usize;
+        let mut vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];
+
+        eprintln!("[BUFFERS] vert_free_arr: num_vertices={}, each with {} slots",
+                  num_vertices, MEAN_VERTEX_DEGREE);
 
         let free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("free_arr"),
@@ -381,6 +387,13 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        let flip23_new_slot = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("flip23_new_slot"),
+            size: (max_tets as u64) * 4, // i32 = 4 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
         Self {
             points: points_buf,
             tets,
@@ -414,6 +427,7 @@ impl GpuBuffers {
             act_tet_vec,
             vote_arr,
             flip_to_tet,
+            flip23_new_slot,
             breadcrumbs,
             thread_debug,
             update_debug,
@@ -539,6 +553,16 @@ impl GpuBuffers {
     ) -> u32 {
         let vals: Vec<u32> = self.read_buffer_as(device, queue, &self.flip_count, 1).await;
         vals[0]
+    }
+
+    /// Read compaction counter (from counters[0] after compact_if_negative pass 1).
+    pub async fn read_compact_count(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> u32 {
+        let counters = self.read_counters(device, queue).await;
+        counters.free_count // Using free_count as counter[0]
     }
 
     /// Write a uniform params buffer (vec4<u32>).

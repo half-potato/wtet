@@ -29,13 +29,18 @@ pub async fn delaunay_3d(
     points: &[[f32; 3]],
     config: &GDelConfig,
 ) -> DelaunayResult {
+    eprintln!("\n[DELAUNAY] Starting delaunay_3d with {} points", points.len());
     assert!(points.len() >= 4, "Need at least 4 points for 3D Delaunay");
 
     // Normalize points to [0,1]³ for numerical stability
+    eprintln!("[DELAUNAY] Normalizing points...");
     let (normalized, _bbox_min, _bbox_scale) = normalize_points(points);
+    eprintln!("[DELAUNAY] ✓ Points normalized");
 
     // Phase 1: GPU insertion + flipping
+    eprintln!("[DELAUNAY] Creating GpuState...");
     let mut state = gpu::GpuState::new(device, queue, &normalized, config).await;
+    eprintln!("[DELAUNAY] ✓ GpuState created");
     phase1::run(device, queue, &mut state, config).await;
 
     // Phase 2: CPU star splaying (optional)

@@ -160,6 +160,7 @@ fn test_normalize_points() {
 fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
         backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG,
         ..Default::default()
     });
 
@@ -242,10 +243,26 @@ fn test_gpu_flip_shader_compiles() {
 #[test]
 fn test_gpu_gather_shader_compiles() {
     with_gpu(|device, _queue| {
-        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        eprintln!("TEST: Creating gather shader module...");
+        let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gather.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/gather.wgsl").into()),
         });
+        eprintln!("TEST: ✓ Gather shader module created");
+
+        // Try to get compilation info
+        eprintln!("TEST: Checking compilation info...");
+        let info = pollster::block_on(module.get_compilation_info());
+        let msg_count = info.messages.len();
+        for message in &info.messages {
+            eprintln!("  [{:?}] {}", message.message_type, message.message);
+        }
+        if msg_count == 0 {
+            eprintln!("TEST: ✓ No compilation messages");
+        } else {
+            eprintln!("TEST: Found {} compilation messages", msg_count);
+        }
+        eprintln!("TEST: ✓ Shader compilation test complete");
     });
 }
 
@@ -1315,6 +1332,67 @@ fn test_delaunay_uniform_300() {
 // ============================================================================
 
 #[test]
+fn test_minimal_pipeline_creation() {
+    eprintln!("TEST: Starting test_minimal_pipeline_creation");
+    with_gpu(|device, _queue| {
+        eprintln!("TEST: Inside with_gpu callback");
+        use crate::gpu::buffers::GpuBuffers;
+        use crate::gpu::pipelines::Pipelines;
+        use crate::types::GpuPoint;
+
+        eprintln!("TEST: Creating test points");
+        let points: Vec<GpuPoint> = vec![
+            GpuPoint::new(0.0, 0.0, 0.0),
+            GpuPoint::new(1.0, 0.0, 0.0),
+            GpuPoint::new(0.0, 1.0, 0.0),
+            GpuPoint::new(0.0, 0.0, 1.0),
+            // Super-tet vertices
+            GpuPoint::new(-100.0, -100.0, -100.0),
+            GpuPoint::new(400.0, -100.0, -100.0),
+            GpuPoint::new(-100.0, 400.0, -100.0),
+            GpuPoint::new(-100.0, -100.0, 400.0),
+        ];
+
+        eprintln!("TEST: Calling GpuBuffers::new");
+        let buffers = GpuBuffers::new(device, &points, 4, 64);
+        eprintln!("TEST: ✓ Buffers created");
+
+        eprintln!("TEST: Calling Pipelines::new");
+        let _pipelines = Pipelines::new(device, &buffers, 4, 64);
+        eprintln!("TEST: ✓ Pipelines created successfully");
+    });
+    eprintln!("TEST: Test completed");
+}
+
+#[test]
+fn test_minimal_buffer_creation() {
+    eprintln!("TEST: Starting test_minimal_buffer_creation");
+    with_gpu(|device, _queue| {
+        eprintln!("TEST: Inside with_gpu callback");
+        use crate::gpu::buffers::GpuBuffers;
+        use crate::types::GpuPoint;
+
+        eprintln!("TEST: Creating test points");
+        let points: Vec<GpuPoint> = vec![
+            GpuPoint::new(0.0, 0.0, 0.0),
+            GpuPoint::new(1.0, 0.0, 0.0),
+            GpuPoint::new(0.0, 1.0, 0.0),
+            GpuPoint::new(0.0, 0.0, 1.0),
+            // Super-tet vertices
+            GpuPoint::new(-100.0, -100.0, -100.0),
+            GpuPoint::new(400.0, -100.0, -100.0),
+            GpuPoint::new(-100.0, 400.0, -100.0),
+            GpuPoint::new(-100.0, -100.0, 400.0),
+        ];
+
+        eprintln!("TEST: Calling GpuBuffers::new");
+        let _buffers = GpuBuffers::new(device, &points, 4, 64);
+        eprintln!("TEST: ✓ Buffers created successfully");
+    });
+    eprintln!("TEST: Test completed");
+}
+
+#[test]
 fn test_config_centroid_rule() {
     with_gpu(|device, queue| {
         let points = gen_uniform_random(100, 33333);
@@ -1941,4 +2019,41 @@ fn test_raw_cospherical_12() {
         let v = validate_raw(&all_pts, &result, points.len() as u32);
         assert!(v.is_ok(), "Raw cospherical 12: {}", v.unwrap_err());
     });
+}
+#[test]
+fn test_update_opp_shader_compiles() {
+    let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {
+        backends: wgpu::Backends::all(),
+        flags: wgpu::InstanceFlags::VALIDATION | wgpu::InstanceFlags::DEBUG,
+        ..Default::default()
+    });
+
+    let adapter = pollster::block_on(instance.request_adapter(&wgpu::RequestAdapterOptions {
+        power_preference: wgpu::PowerPreference::HighPerformance,
+        force_fallback_adapter: false,
+        compatible_surface: None,
+    })).unwrap();
+
+    let (device, _queue) = pollster::block_on(adapter.request_device(
+        &wgpu::DeviceDescriptor {
+            label: Some("test"),
+            required_features: wgpu::Features::empty(),
+            required_limits: wgpu::Limits::default(),
+            memory_hints: Default::default(),
+        },
+        None,
+    )).unwrap();
+
+    eprintln!("Creating update_opp shader module...");
+    let module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("update_opp.wgsl"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/update_opp.wgsl").into()),
+    });
+    eprintln!("✓ Shader module created");
+
+    let info = pollster::block_on(module.get_compilation_info());
+    eprintln!("Compilation messages: {}", info.messages.len());
+    for msg in &info.messages {
+        eprintln!("  [{:?}] {}", msg.message_type, msg.message);
+    }
 }

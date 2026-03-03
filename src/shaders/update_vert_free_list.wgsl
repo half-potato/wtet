@@ -13,7 +13,7 @@
 @group(0) @binding(2) var<storage, read_write> free_arr: array<u32>;
 @group(0) @binding(3) var<uniform> params: vec4<u32>; // x = num_insertions, y = start_free_idx
 
-const MEAN_VERTEX_DEGREE: u32 = 64u;
+const MEAN_VERTEX_DEGREE: u32 = 8u;
 
 @compute @workgroup_size(64)
 fn update_vert_free_list(

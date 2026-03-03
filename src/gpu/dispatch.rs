@@ -224,116 +224,57 @@ impl GpuState {
         );
     }
 
-    // ==================== NEW DISPATCH FUNCTIONS (14 KERNELS) ====================
-
-    /// Dispatch collect free slots (compaction).
+    // ==================== STUB DISPATCH FUNCTIONS (COMMENTED OUT) ====================
+    // TODO: Implement these kernels and uncomment when ready
+    /*
     pub fn dispatch_collect_free_slots(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_tets: u32) {
-        queue.write_buffer(&self.pipelines.collect_free_slots_params, 0, bytemuck::cast_slice(&[num_tets, 0u32, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("collect_free_slots"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.collect_free_slots_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.collect_free_slots_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_tets, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch make compact map (compaction).
     pub fn dispatch_make_compact_map(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, new_tet_num: u32, total_tet_num: u32) {
-        queue.write_buffer(&self.pipelines.make_compact_map_params, 0, bytemuck::cast_slice(&[new_tet_num, total_tet_num, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("make_compact_map"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.make_compact_map_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.make_compact_map_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(total_tet_num - new_tet_num, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch compact tets (compaction).
     pub fn dispatch_compact_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, new_tet_num: u32, total_tet_num: u32) {
-        queue.write_buffer(&self.pipelines.compact_tets_params, 0, bytemuck::cast_slice(&[new_tet_num, total_tet_num, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("compact_tets"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.compact_tets_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.compact_tets_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(total_tet_num - new_tet_num, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch mark special tets (flip management).
     pub fn dispatch_mark_special_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue) {
-        queue.write_buffer(&self.pipelines.mark_special_tets_params, 0, bytemuck::cast_slice(&[self.max_tets, 0u32, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("mark_special_tets"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.mark_special_tets_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.mark_special_tets_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch update flip trace (flip management).
     pub fn dispatch_update_flip_trace(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
-        queue.write_buffer(&self.pipelines.update_flip_trace_params, 0, bytemuck::cast_slice(&[org_flip_num, flip_num, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("update_flip_trace"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.update_flip_trace_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.update_flip_trace_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(flip_num, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch update block vert free list (block allocation).
     pub fn dispatch_update_block_vert_free_list(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ins_num: u32, old_ins_num: u32) {
-        queue.write_buffer(&self.pipelines.update_block_vert_free_list_params, 0, bytemuck::cast_slice(&[ins_num, old_ins_num, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("update_block_vert_free_list"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.update_block_vert_free_list_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.update_block_vert_free_list_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(ins_num * 8, 64), 1, 1); // MEAN_VERTEX_DEGREE = 8
+        // ...stub...
     }
 
-    /// Dispatch update block opp tet idx (block allocation).
     pub fn dispatch_update_block_opp_tet_idx(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, old_inf_block_idx: u32, new_inf_block_idx: u32, old_tet_num: u32) {
-        queue.write_buffer(&self.pipelines.update_block_opp_tet_idx_params, 0, bytemuck::cast_slice(&[old_inf_block_idx, new_inf_block_idx, old_tet_num, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("update_block_opp_tet_idx"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.update_block_opp_tet_idx_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.update_block_opp_tet_idx_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(old_tet_num, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch shift inf free idx (index shifting).
     pub fn dispatch_shift_inf_free_idx(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, inf_idx: u32, start: u32, shift: u32) {
-        queue.write_buffer(&self.pipelines.shift_inf_free_idx_params, 0, bytemuck::cast_slice(&[inf_idx, start, shift, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("shift_inf_free_idx"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.shift_inf_free_idx_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.shift_inf_free_idx_bind_group), &[]);
-        // Dispatched based on vert_free_arr[inf_idx] - would need to read that first
-        pass.dispatch_workgroups(1, 1, 1); // Placeholder
+        // ...stub...
     }
 
-    /// Dispatch update tet idx (index shifting).
     pub fn dispatch_update_tet_idx(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, old_inf_block_idx: u32, new_inf_block_idx: u32, vec_size: u32) {
-        queue.write_buffer(&self.pipelines.update_tet_idx_params, 0, bytemuck::cast_slice(&[old_inf_block_idx, new_inf_block_idx, vec_size, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("update_tet_idx"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.update_tet_idx_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.update_tet_idx_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(vec_size, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch shift opp tet idx (index shifting).
     pub fn dispatch_shift_opp_tet_idx(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, tet_num: u32, start: u32, shift: u32) {
-        queue.write_buffer(&self.pipelines.shift_opp_tet_idx_params, 0, bytemuck::cast_slice(&[tet_num, start, shift, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("shift_opp_tet_idx"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.shift_opp_tet_idx_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.shift_opp_tet_idx_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(tet_num, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch shift tet idx (index shifting).
     pub fn dispatch_shift_tet_idx(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, vec_size: u32, start: u32, shift: u32) {
-        queue.write_buffer(&self.pipelines.shift_tet_idx_params, 0, bytemuck::cast_slice(&[vec_size, start, shift, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("shift_tet_idx"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.shift_tet_idx_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.shift_tet_idx_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(vec_size, 64), 1, 1);
+        // ...stub...
     }
 
-    /// Dispatch make reverse map (utility).
     pub fn dispatch_make_reverse_map(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ins_vert_num: u32, num: u32) {
-        queue.write_buffer(&self.pipelines.make_reverse_map_params, 0, bytemuck::cast_slice(&[ins_vert_num, num, 0u32, 0u32]));
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("make_reverse_map"), timestamp_writes: None });
-        pass.set_pipeline(&self.pipelines.make_reverse_map_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.make_reverse_map_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(ins_vert_num, 64), 1, 1);
+        // ...stub...
     }
+    */
 
     /// Dispatch update opp (CRITICAL - flip adjacency updates).
     pub fn dispatch_update_opp(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
@@ -351,6 +292,52 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.mark_rejected_flips_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.mark_rejected_flips_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+    }
+
+    /// Dispatch check delaunay fast (flip voting).
+    pub fn dispatch_check_delaunay_fast(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, act_tet_num: u32, vote_offset: u32) {
+        queue.write_buffer(&self.pipelines.check_delaunay_fast_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("check_delaunay_fast"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.check_delaunay_fast_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.check_delaunay_fast_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+    }
+
+    /// Dispatch allocate flip23 slot.
+    pub fn dispatch_allocate_flip23_slot(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, flip_num: u32, inf_idx: u32, tet_num: u32) {
+        queue.write_buffer(&self.pipelines.allocate_flip23_slot_params, 0, bytemuck::cast_slice(&[flip_num, inf_idx, tet_num, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("allocate_flip23_slot"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.allocate_flip23_slot_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.allocate_flip23_slot_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(flip_num, 64), 1, 1);
+    }
+
+    /// Dispatch compact if negative (two-pass compaction).
+    /// Returns the compacted count via reading counter[0] after both passes.
+    pub fn dispatch_compact_if_negative(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, input_size: u32) {
+        // Pass 1: Count non-negative values
+        queue.write_buffer(&self.pipelines.compact_if_negative_params, 0, bytemuck::cast_slice(&[input_size, 0u32, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("compact_if_negative_pass1"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.compact_if_negative_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.compact_if_negative_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(input_size, 256), 1, 1);
+        drop(pass);
+
+        // Pass 2: Compact non-negative values
+        queue.write_buffer(&self.pipelines.compact_if_negative_params, 0, bytemuck::cast_slice(&[input_size, 1u32, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("compact_if_negative_pass2"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.compact_if_negative_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.compact_if_negative_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(input_size, 256), 1, 1);
+    }
+
+    /// Dispatch relocate points fast.
+    pub fn dispatch_relocate_points_fast(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_uninserted: u32) {
+        queue.write_buffer(&self.pipelines.relocate_points_fast_params, 0, bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("relocate_points_fast"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.relocate_points_fast_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.relocate_points_fast_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 }
 
