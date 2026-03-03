@@ -83,20 +83,21 @@ fn relocate_points_fast(
         var next_loc_id: i32;
         var F: vec3<u32>;
 
-        if f_type == 0u {
-            // Flip23
-            F = vec3<u32>(0u, 2u, 3u);
-        } else {
-            // Flip32
-            F = vec3<u32>(0u, 1u, 2u);
-        }
+        // Pre-load flip_item vertices to avoid dynamic indexing
+        let p0 = points[u32(flip_item[0])].xyz;
+        let p1 = points[u32(flip_item[1])].xyz;
+        let p2 = points[u32(flip_item[2])].xyz;
+        let p3 = points[u32(flip_item[3])].xyz;
+        let p4 = points[u32(flip_item[4])].xyz;
 
-        let ord0 = orient3d_fast(
-            points[u32(flip_item[F.x])].xyz,
-            points[u32(flip_item[F.y])].xyz,
-            points[u32(flip_item[F.z])].xyz,
-            vertex_p
-        );
+        var ord0: i32;
+        if f_type == 0u {
+            // Flip23: F = (0, 2, 3)
+            ord0 = orient3d_fast(p0, p2, p3, vertex_p);
+        } else {
+            // Flip32: F = (0, 1, 2)
+            ord0 = orient3d_fast(p0, p1, p2, vertex_p);
+        }
 
         if ord0 == 0 {
             // Need exact computation - mark and break
@@ -109,20 +110,16 @@ fn relocate_points_fast(
             next_loc_id = select(1, 0, ord0 == 1);
         } else {
             // Flip23
+            var ord1: i32;
             if ord0 == 1 {
                 next_loc_id = 0;
-                F = vec3<u32>(0u, 3u, 1u);
+                // F = (0, 3, 1)
+                ord1 = orient3d_fast(p0, p3, p1, vertex_p);
             } else {
                 next_loc_id = 1;
-                F = vec3<u32>(0u, 4u, 3u);
+                // F = (0, 4, 3)
+                ord1 = orient3d_fast(p0, p4, p3, vertex_p);
             }
-
-            let ord1 = orient3d_fast(
-                points[u32(flip_item[F.x])].xyz,
-                points[u32(flip_item[F.y])].xyz,
-                points[u32(flip_item[F.z])].xyz,
-                vertex_p
-            );
 
             if ord1 == 0 {
                 // Need exact computation - mark and break

@@ -190,7 +190,9 @@ fn check_delaunay_fast(
             let top_ti = decode_opp_tet(bot_opp[bot_vi]);
             let top_vi = decode_opp_vi(bot_opp[bot_vi]);
             let tet = tets[top_ti];
-            top_vert = i32(tet[top_vi]);
+            // Avoid dynamic vector indexing - use select chain
+            let tet_elem = select(select(tet.x, tet.y, top_vi == 1u), select(tet.z, tet.w, top_vi == 3u), top_vi >= 2u);
+            top_vert = i32(tet_elem);
 
             // If neighbor changed and has lower index, mark as negative
             if (top_ti < bot_ti_u) && is_tet_changed(tet_info[top_ti]) {
@@ -216,7 +218,9 @@ fn check_delaunay_fast(
         var i = 0u;
 
         for (; i < 3u; i++) {
-            let side_vert = opp_vert[bot_ord_vi[i]];
+            // Avoid dynamic vector indexing
+            let ord_vi_elem = select(bot_ord_vi.x, select(bot_ord_vi.y, bot_ord_vi.z, i == 2u), i >= 1u);
+            let side_vert = opp_vert[ord_vi_elem];
 
             // More than 3 tets around edge
             if side_vert != top_vert && side_vert != make_negative(top_vert) {
@@ -280,7 +284,8 @@ fn check_delaunay_fast(
             vote_arr[idx] = make_vote_val(bot_ti_u, flip_info);
 
             let bot_ord_vi = TET_VI_AS_SEEN_FROM[bot_vi];
-            let bot_cor_vi = bot_ord_vi[bot_cor_ord_vi];
+            // Avoid dynamic vector indexing
+            let bot_cor_vi = select(bot_ord_vi.x, select(bot_ord_vi.y, bot_ord_vi.z, bot_cor_ord_vi == 2u), bot_cor_ord_vi >= 1u);
             let bot_opp_ti = decode_opp_tet(bot_opp[bot_cor_vi]);
             let top_ti = decode_opp_tet(bot_opp[bot_vi]);
             vote_for_flip32(vote_offset, bot_ti_u, top_ti, bot_opp_ti);
@@ -311,11 +316,16 @@ fn check_delaunay_fast(
 
         // Go around bottom-top tetra, check 3 sides
         for (var i = 0u; i < 3u; i++) {
-            let fv = TET_VI_AS_SEEN_FROM[bot_ord_vi[i]];
+            // Avoid dynamic vector and array indexing
+            let ord_vi_elem = select(bot_ord_vi.x, select(bot_ord_vi.y, bot_ord_vi.z, i == 2u), i >= 1u);
+            let fv = TET_VI_AS_SEEN_FROM[ord_vi_elem];
 
-            let ort = orient3d_fast(
-                bot_p[fv.x], bot_p[fv.y], bot_p[fv.z], top_p
-            );
+            // Extract bot_p elements using select to avoid dynamic array indexing
+            let p0 = select(select(bot_p[0], bot_p[1], fv.x == 1u), select(bot_p[2], bot_p[3], fv.x == 3u), fv.x >= 2u);
+            let p1 = select(select(bot_p[0], bot_p[1], fv.y == 1u), select(bot_p[2], bot_p[3], fv.y == 3u), fv.y >= 2u);
+            let p2 = select(select(bot_p[0], bot_p[1], fv.z == 1u), select(bot_p[2], bot_p[3], fv.z == 3u), fv.z >= 2u);
+
+            let ort = orient3d_fast(p0, p1, p2, top_p);
 
             if ort == 0 {
                 // Mark as special for exact mode

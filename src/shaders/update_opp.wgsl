@@ -104,7 +104,7 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         ext_opp[5] = atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 0u) & 3u)]);
     }
 
-    // Update with neighbors
+    // // Update with neighbors
     for (var i = 0u; i < 6u; i++) {
         var new_tet_idx: u32;
         var vi: u32;
@@ -118,10 +118,13 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         if u32(msg.y) < org_flip_num {
             // Neighbor not flipped - set my neighbor's opp
             if is_flip23 {
-                new_tet_idx = u32(flip_item[i / 2u]);
+                // flip_item[i / 2u] - avoid dynamic indexing
+                let idx = i / 2u;
+                new_tet_idx = select(select(u32(flip_item[0]), u32(flip_item[1]), idx == 1u), u32(flip_item[2]), idx == 2u);
                 vi = select(0u, 3u, (i & 1u) != 0u);
             } else {
-                new_tet_idx = u32(flip_item[1u - (i & 1u)]);
+                // flip_item[1u - (i & 1u)] - avoid dynamic indexing
+                new_tet_idx = select(u32(flip_item[1]), u32(flip_item[0]), (i & 1u) != 0u);
                 vi = FLIP32_NEW_FACE_VI[i / 2u][i & 1u];
             }
 

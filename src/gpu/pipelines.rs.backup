@@ -97,7 +97,11 @@ impl Pipelines {
         num_points: u32,
         max_tets: u32,
     ) -> Self {
+        eprintln!("[PIPELINES] Creating compute pipelines:");
+        eprintln!("  num_points={}, max_tets={}", num_points, max_tets);
+
         // --- Init pipeline ---
+        eprintln!("  Creating init pipeline...");
         let init_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("init.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -152,8 +156,10 @@ impl Pipelines {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("    ✓ init pipeline created");
 
         // --- Point location pipeline ---
+        eprintln!("  Creating point_location pipeline...");
         let locate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("point_location.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -390,6 +396,7 @@ impl Pipelines {
             push_constant_ranges: &[],
         });
 
+        eprintln!("  Creating mark_split pipeline...");
         let mark_split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mark_split"),
             layout: Some(&mark_split_pl),
@@ -452,6 +459,7 @@ impl Pipelines {
             push_constant_ranges: &[],
         });
 
+        eprintln!("  Creating split pipeline...");
         let split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("split"),
             layout: Some(&split_pl),
@@ -577,6 +585,8 @@ impl Pipelines {
             push_constant_ranges: &[],
         });
 
+        eprintln!("  Creating flip pipeline...");
+        eprintln!("    flip_bgl created, flip_pl created, flip_shader loaded");
         eprintln!("    About to call device.create_compute_pipeline...");
         let flip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("flip"),
@@ -586,8 +596,10 @@ impl Pipelines {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("    ✓ flip pipeline created");
 
         // --- Reset votes pipeline ---
+        eprintln!("  Creating reset_votes pipeline...");
         let reset_votes_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("reset_votes.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -629,8 +641,10 @@ impl Pipelines {
                 compilation_options: Default::default(),
                 cache: None,
             });
+        eprintln!("    ✓ reset_votes pipeline created");
 
         // --- Gather failed pipeline ---
+        eprintln!("  Creating gather pipeline...");
         let gather_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("gather.wgsl"),
             source: wgpu::ShaderSource::Wgsl(
@@ -674,6 +688,8 @@ impl Pipelines {
             push_constant_ranges: &[],
         });
 
+        eprintln!("    About to create gather compute pipeline...");
+        eprintln!("    Descriptor: entry_point='gather_failed'");
 
         // Get shader compilation info first
         let shader_info = pollster::block_on(gather_shader.get_compilation_info());
@@ -695,6 +711,7 @@ impl Pipelines {
             })
         })) {
             Ok(pipeline) => {
+                eprintln!("    ✓ gather pipeline created successfully");
                 pipeline
             }
             Err(e) => {
@@ -706,8 +723,10 @@ impl Pipelines {
 
         // ==================== NEW PIPELINES (14 KERNELS) - PROPER BIND GROUPS ====================
 
+        eprintln!("  Creating unreachable pipelines (collect_free_slots, etc.)...");
 
         // --- 1. Collect free slots (compaction) ---
+        eprintln!("    Creating collect_free_slots pipeline...");
         let collect_free_slots_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("collect_free_slots.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/collect_free_slots.wgsl").into()),
@@ -732,6 +751,7 @@ impl Pipelines {
             bind_group_layouts: &[&collect_free_slots_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("      About to create collect_free_slots compute pipeline...");
         let collect_free_slots_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("collect_free_slots"),
             layout: Some(&collect_free_slots_pl),
@@ -740,6 +760,7 @@ impl Pipelines {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("      ✓ collect_free_slots pipeline created");
 
         // --- 2. Make compact map (compaction) ---
         let make_compact_map_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -766,6 +787,7 @@ impl Pipelines {
             bind_group_layouts: &[&make_compact_map_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating make_compact_map pipeline...");
         let make_compact_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("make_compact_map"),
             layout: Some(&make_compact_map_pl),
@@ -801,6 +823,7 @@ impl Pipelines {
             bind_group_layouts: &[&compact_tets_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating compact_tets pipeline...");
         let compact_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("compact_tets"),
             layout: Some(&compact_tets_pl),
@@ -834,6 +857,7 @@ impl Pipelines {
             bind_group_layouts: &[&mark_special_tets_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating mark_special_tets pipeline...");
         let mark_special_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mark_special_tets"),
             layout: Some(&mark_special_tets_pl),
@@ -867,6 +891,7 @@ impl Pipelines {
             bind_group_layouts: &[&update_flip_trace_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating update_flip_trace pipeline...");
         let update_flip_trace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_flip_trace"),
             layout: Some(&update_flip_trace_pl),
@@ -910,6 +935,7 @@ impl Pipelines {
             bind_group_layouts: &[&update_block_vert_free_list_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating update_block_vert_free_list pipeline...");
         let update_block_vert_free_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_block_vert_free_list"),
             layout: Some(&update_block_vert_free_list_pl),
@@ -947,6 +973,7 @@ impl Pipelines {
             bind_group_layouts: &[&update_block_opp_tet_idx_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating update_block_opp_tet_idx pipeline...");
         let update_block_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_block_opp_tet_idx"),
             layout: Some(&update_block_opp_tet_idx_pl),
@@ -980,6 +1007,7 @@ impl Pipelines {
             bind_group_layouts: &[&shift_inf_free_idx_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating shift_inf_free_idx pipeline...");
         let shift_inf_free_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("shift_inf_free_idx"),
             layout: Some(&shift_inf_free_idx_pl),
@@ -1014,6 +1042,7 @@ impl Pipelines {
             bind_group_layouts: &[&shift_opp_tet_idx_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating shift_opp_tet_idx pipeline...");
         let shift_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("shift_opp_tet_idx"),
             layout: Some(&shift_opp_tet_idx_pl),
@@ -1048,6 +1077,7 @@ impl Pipelines {
             bind_group_layouts: &[&shift_tet_idx_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating shift_tet_idx pipeline...");
         let shift_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("shift_tet_idx"),
             layout: Some(&shift_tet_idx_pl),
@@ -1084,6 +1114,7 @@ impl Pipelines {
             bind_group_layouts: &[&update_tet_idx_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating update_tet_idx pipeline...");
         let update_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_tet_idx"),
             layout: Some(&update_tet_idx_pl),
@@ -1122,6 +1153,7 @@ impl Pipelines {
             bind_group_layouts: &[&make_reverse_map_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("    Creating make_reverse_map pipeline...");
         let make_reverse_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("make_reverse_map"),
             layout: Some(&make_reverse_map_pl),
@@ -1176,6 +1208,7 @@ impl Pipelines {
         });
 
         // --- 13. Mark rejected flips (flip validation) ---
+        eprintln!("    Creating mark_rejected_flips pipeline...");
         let mark_rejected_flips_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mark_rejected_flips.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/mark_rejected_flips.wgsl").into()),
@@ -1381,6 +1414,7 @@ impl Pipelines {
             bind_group_layouts: &[&relocate_points_fast_bgl],
             push_constant_ranges: &[],
         });
+        eprintln!("      Creating relocate_points_fast compute pipeline...");
         let relocate_points_fast_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("relocate_points_fast"),
             layout: Some(&relocate_points_fast_pl),
@@ -1389,6 +1423,7 @@ impl Pipelines {
             compilation_options: Default::default(),
             cache: None,
         });
+        eprintln!("      ✓ relocate_points_fast pipeline created");
 
         eprintln!("[PIPELINES] ✓ All pipelines created successfully");
 
