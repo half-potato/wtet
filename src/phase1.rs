@@ -24,6 +24,13 @@ pub async fn run(
         state.dispatch_init(&mut encoder);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
+
+        // Debug: Check if tet 0 is alive after init
+        let tet_info_debug: Vec<u32> = state
+            .buffers
+            .read_buffer_as(device, queue, &state.buffers.tet_info, 1)
+            .await;
+        println!("[DEBUG] After init: tet_info[0] = {}", tet_info_debug[0]);
     }
 
     let mut iteration = 0u32;
@@ -43,11 +50,25 @@ pub async fn run(
 
         // Debug: Check vert_tet at start of iteration
         if iteration == 2 {
-            let vert_tet_debug: Vec<u32> = state
+            // Check vert_tet for uninserted vertices
+            let uninserted_verts: Vec<u32> = state.uninserted.clone();
+            let mut vert_tet_values = Vec::new();
+            for &v in &uninserted_verts {
+                let vert_tet_debug: Vec<u32> = state
+                    .buffers
+                    .read_buffer_as(device, queue, &state.buffers.vert_tet, (v+1) as usize)
+                    .await;
+                vert_tet_values.push(vert_tet_debug[v as usize]);
+            }
+            println!("[DEBUG] Iteration 2 start: uninserted verts = {:?}", uninserted_verts);
+            println!("[DEBUG] Iteration 2 start: vert_tet values = {:?}", vert_tet_values);
+
+            // Check if those tets are alive
+            let tet_info_debug: Vec<u32> = state
                 .buffers
-                .read_buffer_as(device, queue, &state.buffers.vert_tet, state.uninserted.len())
+                .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
                 .await;
-            println!("[DEBUG] Iteration 2 start: vert_tet = {:?}", vert_tet_debug);
+            println!("[DEBUG] Iteration 2 start: tet_info[0..10] = {:?}", tet_info_debug);
         }
 
         // Reset counters for this iteration
@@ -76,9 +97,32 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 3. Pick winners (determine winning vertex per tet and build insert list)
+        // Debug: Read vert_sphere and tet_vote after voting
+        if iteration == 2 {
+            let vert_sphere_debug: Vec<i32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.vert_sphere, num_uninserted as usize)
+                .await;
+            let tet_vote_debug: Vec<i32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.tet_vote, state.max_tets as usize)
+                .await;
+            println!("[DEBUG] After vote: vert_sphere = {:?}", vert_sphere_debug);
+            println!("[DEBUG] After vote: tet_vote (non-NO_VOTE) = {:?}",
+                tet_vote_debug.iter().enumerate()
+                    .filter(|(_, &v)| v != i32::MIN)
+                    .collect::<Vec<_>>());
+        }
+
+        // 3. Pick winners (vertex-parallel: atomicMin to select lowest index per tet)
         let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_pick_winner(&mut encoder, queue);
+        state.dispatch_pick_winner(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        // 4. Build insert list (second pass: filter exact winners to prevent duplicates)
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.dispatch_build_insert_list(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
@@ -87,6 +131,15 @@ pub async fn run(
         let num_inserted = counters.inserted_count;
 
         println!("[DEBUG] Iteration {}: num_inserted = {}", iteration, num_inserted);
+
+        // Debug: Check insert_list content
+        if iteration == 1 && num_inserted > 0 {
+            let insert_list_debug: Vec<[u32; 2]> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
+                .await;
+            println!("[DEBUG] Iteration 1: insert_list = {:?}", insert_list_debug);
+        }
 
         if num_inserted == 0 {
             // Debug: Read back vert_tet and tet_vert to see why no winners
@@ -134,10 +187,27 @@ pub async fn run(
         }
 
         // 5d. Split
+        println!("[DEBUG] Dispatching split with num_inserted = {}", num_inserted);
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split(&mut encoder, queue, num_inserted);
-        queue.submit(Some(encoder.finish()));
+        let command_buffer = encoder.finish();
+        println!("[DEBUG] Submitting split command buffer");
+        queue.submit(Some(command_buffer));
+        println!("[DEBUG] Waiting for split to complete");
         device.poll(wgpu::Maintain::Wait);
+        println!("[DEBUG] Split complete");
+
+        // Debug: Check tet_info and counters after split
+        if iteration == 1 {
+            let tet_info_debug: Vec<u32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
+                .await;
+            let counters_debug = state.buffers.read_counters(device, queue).await;
+            println!("[DEBUG] After split in iteration 1: tet_info[0..10] = {:?}", tet_info_debug);
+            println!("[DEBUG] After split in iteration 1: scratch[2] (threads entered) = {}, scratch[0] (splits run) = {}, scratch[1] (alloc ok) = {}, scratch[3] (alloc fail) = {}",
+                counters_debug.scratch[2], counters_debug.scratch[0], counters_debug.scratch[1], counters_debug.scratch[3]);
+        }
 
         // 5e. Split fixup (DISABLED - split.wgsl handles adjacency inline)
         // let mut encoder = device.create_command_encoder(&Default::default());

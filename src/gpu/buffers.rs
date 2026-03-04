@@ -15,8 +15,10 @@ pub struct GpuBuffers {
     pub tet_info: wgpu::Buffer,
     /// Tet containing each uninserted point: u32 × N
     pub vert_tet: wgpu::Buffer,
-    /// Vote buffer: i32 × max_tets
+    /// Vote buffer (sphere values): i32 × max_tets
     pub tet_vote: wgpu::Buffer,
+    /// Sphere values for vertices: i32 × num_points
+    pub vert_sphere: wgpu::Buffer,
     /// Free tet slot stack: u32 × max_tets
     pub free_stack: wgpu::Buffer,
     /// Block-based free list: u32 × max_tets (for future use)
@@ -150,6 +152,14 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
         eprintln!("    ✓ tet_vote: {} bytes", max_tets * 4);
+
+        let vert_sphere = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vert_sphere"),
+            size: (num_points as u64) * 4,
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+        eprintln!("    ✓ vert_sphere: {} bytes", num_points * 4);
 
         // Free stack: initially filled with indices [1..max_tets) since tet 0 is the super-tet
         let free_data: Vec<u32> = (1..max_tets).collect();
@@ -410,6 +420,7 @@ impl GpuBuffers {
             tet_info,
             vert_tet,
             tet_vote,
+            vert_sphere,
             free_stack,
             free_arr,
             vert_free_arr,

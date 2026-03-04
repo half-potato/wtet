@@ -125,6 +125,12 @@ fn split_tetra(
 ) {
     let tid = gid.x;  // Thread ID for debugging
     let idx = tid;
+
+    // DIAGNOSTIC: Write a sentinel value to prove shader executed
+    if idx == 0u {
+        tet_info[5] = 999u;
+    }
+
     let num_insertions = params.x;
 
     if idx >= num_insertions {
@@ -161,13 +167,33 @@ fn split_tetra(
     let t2 = new_slots.z;
     let t3 = new_slots.w;
 
+    // DIAGNOSTIC: Write allocated tet indices to tet_info[6-9]
+    if idx == 0u {
+        if t0 == 0u {
+            tet_info[6] = 0xAAAAu;  // t0 is 0
+        } else {
+            tet_info[6] = t0;
+        }
+        tet_info[7] = t1;
+        tet_info[9] = t3;
+    }
+
     breadcrumb(tid, CRUMB_AFTER_ALLOC);
     debug_slot(tid, 1u, new_slots);
 
     // Check allocation succeeded
     if t0 == INVALID {
+        // DIAGNOSTIC: Mark allocation failure
+        if idx == 0u {
+            tet_info[7] = 0xDEADu;
+        }
         breadcrumb(tid, 0xDEADu);  // Allocation failed marker
         return;
+    }
+
+    // DIAGNOSTIC: Mark allocation success
+    if idx == 0u {
+        tet_info[8] = 0xBEEFu;
     }
 
     breadcrumb(tid, CRUMB_BEFORE_WRITE);
@@ -187,8 +213,38 @@ fn split_tetra(
 
     breadcrumb(tid, CRUMB_AFTER_WRITE_ALL);
 
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Donate old tet back to its owner's free list
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Port of CUDA KerDivision.cu:181-188
+    //
+    // CUDA:
+    //   const int blkIdx  = tetIdx / MeanVertDegree;
+    //   const int vertIdx = ( blkIdx < insVertVec._num ) ? insVertVec._arr[ blkIdx ] : infIdx;
+    //   const int freeIdx = atomicAdd( &vertFreeArr[ vertIdx ], 1 );
+    //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
+    //   setTetAliveState( tetInfoArr[ tetIdx ], false );
+    //
+    // Calculate which block this tet belongs to
+    let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
+
+    // Determine owner vertex:
+    //   - If blk_idx < inf_idx, it's a real point or super-tet vertex (owner = blk_idx)
+    //   - Otherwise, it belongs to the infinity block (owner = inf_idx)
+    var owner_vertex = blk_idx;
+    if blk_idx >= inf_idx {
+        owner_vertex = inf_idx;
+    }
+
+    // Atomically increment this vertex's free count and get the slot index
+    let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
+
+    // Store old_tet in the owner's free list
+    free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot_idx] = old_tet;
+
     // Mark old tet as dead
     tet_info[old_tet] = 0u;
+    // ═══════════════════════════════════════════════════════════════════════════
 
     breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);
 
@@ -209,28 +265,46 @@ fn split_tetra(
     set_opp_at(t0, 0u, encode_opp(t1, 0u));   // face 0: T1's face 0
     set_opp_at(t0, 1u, encode_opp(t3, 0u));   // face 1: T3's face 0
     set_opp_at(t0, 2u, encode_opp(t2, 0u));   // face 2: T2's face 0
-    set_opp_at(t0, 3u, orig_opp_0);           // face 3: external (was opp v0)
+    // face 3: external - set below after detecting concurrent splits
 
     // T1 (vi=1) adjacency: IntSplitFaceOpp[1] = {0, 0, 2, 2, 3, 1}
     set_opp_at(t1, 0u, encode_opp(t0, 0u));   // face 0: T0's face 0
     set_opp_at(t1, 1u, encode_opp(t2, 2u));   // face 1: T2's face 2
     set_opp_at(t1, 2u, encode_opp(t3, 1u));   // face 2: T3's face 1
-    set_opp_at(t1, 3u, orig_opp_1);           // face 3: external (was opp v1)
+    // face 3: external - set below after detecting concurrent splits
 
     // T2 (vi=2) adjacency: IntSplitFaceOpp[2] = {0, 2, 3, 2, 1, 1}
     set_opp_at(t2, 0u, encode_opp(t0, 2u));   // face 0: T0's face 2
     set_opp_at(t2, 1u, encode_opp(t3, 2u));   // face 1: T3's face 2
     set_opp_at(t2, 2u, encode_opp(t1, 1u));   // face 2: T1's face 1
-    set_opp_at(t2, 3u, orig_opp_2);           // face 3: external (was opp v2)
+    // face 3: external - set below after detecting concurrent splits
 
     // T3 (vi=3) adjacency: IntSplitFaceOpp[3] = {0, 1, 1, 2, 2, 1}
     set_opp_at(t3, 0u, encode_opp(t0, 1u));   // face 0: T0's face 1
     set_opp_at(t3, 1u, encode_opp(t1, 2u));   // face 1: T1's face 2
     set_opp_at(t3, 2u, encode_opp(t2, 1u));   // face 2: T2's face 1
-    set_opp_at(t3, 3u, orig_opp_3);           // face 3: external (was opp v3)
+    // face 3: external - set below after detecting concurrent splits
 
-    // Update external neighbours to point back to us.
-    // Uses tet_to_vert to detect concurrent splits (CUDA: KerDivision.cu:140-162)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Set external adjacency (face 3) for each of the 4 new tets
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Port of CUDA KerDivision.cu:139-163
+    //
+    // CRITICAL: Must detect concurrent splits BEFORE setting face 3!
+    // If a neighbor has split concurrently, face 3 must point to the correct
+    // new tet (not the old dead tet).
+    //
+    // CUDA:
+    //   int neiTetIdx = oldOpp.getOppTet( vi );
+    //   int neiTetVi  = oldOpp.getOppVi( vi );
+    //   const int neiSplitIdx = tetToVert[ neiTetIdx ];
+    //   if ( neiSplitIdx != INT_MAX ) {
+    //       neiTetIdx = freeArr[ neiFreeIdx - neiTetVi ];
+    //       neiTetVi  = 3;
+    //   }
+    //   newOpp.setOpp( 3, neiTetIdx, neiTetVi );
+    //   oppArr[ neiTetIdx ].setOpp( neiTetVi, newTetIdx[vi], 3 );
+    //
     let ext_opps = array<u32, 4>(orig_opp_0, orig_opp_1, orig_opp_2, orig_opp_3);
     let new_tets = array<u32, 4>(t0, t1, t2, t3);
 
@@ -253,8 +327,17 @@ fn split_tetra(
                 nei_face = 3u;  // External faces become face 3 after split
             }
 
-            // Point neighbor back to this new tet (safe whether split or not)
-            set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], k));
+            // ═════════════════════════════════════════════════════════════════════
+            // CRITICAL FIX: Set OUTGOING edge (this tet's face 3 → neighbor)
+            // ═════════════════════════════════════════════════════════════════════
+            // This was missing! Without it, face 3 points to old dead tets.
+            set_opp_at(new_tets[k], 3u, encode_opp(nei_tet, nei_face));
+
+            // Set INCOMING edge (neighbor → this tet's face 3)
+            set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], 3u));
+        } else {
+            // No external neighbor (boundary face) - mark as invalid
+            set_opp_at(new_tets[k], 3u, INVALID);
         }
     }
 

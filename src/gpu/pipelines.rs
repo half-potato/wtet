@@ -22,6 +22,11 @@ pub struct Pipelines {
     pub pick_bind_group: wgpu::BindGroup,
     pub pick_params: wgpu::Buffer,
 
+    // Pipeline: build insert list (filters exact winners after pick_winner)
+    pub build_insert_list_pipeline: wgpu::ComputePipeline,
+    pub build_insert_list_bind_group: wgpu::BindGroup,
+    pub build_insert_list_params: wgpu::Buffer,
+
     // Pipeline: update vert free list (allocates tet blocks for inserting vertices)
     pub update_vert_free_pipeline: wgpu::ComputePipeline,
     pub update_vert_free_bind_group: wgpu::BindGroup,
@@ -255,10 +260,11 @@ impl Pipelines {
                 storage_ro_entry(0),  // points
                 storage_ro_entry(1),  // tets
                 storage_ro_entry(2),  // tet_info
-                storage_rw_entry(3),  // tet_vote
-                storage_ro_entry(4),  // vert_tet
-                storage_ro_entry(5),  // uninserted
-                uniform_entry(6),     // params
+                storage_rw_entry(3),  // tet_vote (atomic i32)
+                storage_rw_entry(4),  // vert_sphere (i32, stores sphere values)
+                storage_ro_entry(5),  // vert_tet
+                storage_ro_entry(6),  // uninserted
+                uniform_entry(7),     // params
             ],
         });
 
@@ -270,9 +276,10 @@ impl Pipelines {
                 buf_entry(1, &bufs.tets),
                 buf_entry(2, &bufs.tet_info),
                 buf_entry(3, &bufs.tet_vote),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.uninserted),
-                buf_entry(6, &vote_params),
+                buf_entry(4, &bufs.vert_sphere),
+                buf_entry(5, &bufs.vert_tet),
+                buf_entry(6, &bufs.uninserted),
+                buf_entry(7, &vote_params),
             ],
         });
 
@@ -292,26 +299,18 @@ impl Pipelines {
         });
 
         // --- Pick winner pipeline ---
-        let pick_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pick_winner.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/pick_winner.wgsl").into(),
-            ),
-        });
-
-        let pick_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+        // Uses pick_winner_point entry point from vote.wgsl
+        let pick_params = GpuBuffers::create_params_buffer(device, [num_points, 0, 0, 0]);
 
         let pick_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("pick_bgl"),
             entries: &[
-                storage_ro_entry(0),  // tets
-                storage_ro_entry(1),  // tet_info
-                storage_ro_entry(2),  // tet_vote (read-only i32)
-                storage_ro_entry(3),  // uninserted
-                storage_rw_entry(4),  // insert_list
-                storage_rw_entry(5),  // counters
-                storage_ro_entry(6),  // vert_tet (ADDED for vertex-parallel iteration)
-                uniform_entry(7),     // params
+                storage_ro_entry(0),  // vert_sphere
+                storage_ro_entry(1),  // tet_vote (winning sphere values)
+                storage_ro_entry(2),  // vert_tet
+                storage_rw_entry(3),  // tet_to_vert (atomicMin winner selection)
+                storage_ro_entry(4),  // uninserted (map position to vertex ID)
+                uniform_entry(5),     // params
             ],
         });
 
@@ -319,14 +318,12 @@ impl Pipelines {
             label: Some("pick_bg"),
             layout: &pick_bgl,
             entries: &[
-                buf_entry(0, &bufs.tets),
-                buf_entry(1, &bufs.tet_info),
-                buf_entry(2, &bufs.tet_vote),
-                buf_entry(3, &bufs.uninserted),
-                buf_entry(4, &bufs.insert_list),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &bufs.vert_tet),
-                buf_entry(7, &pick_params),
+                buf_entry(0, &bufs.vert_sphere),
+                buf_entry(1, &bufs.tet_vote),
+                buf_entry(2, &bufs.vert_tet),
+                buf_entry(3, &bufs.tet_to_vert),
+                buf_entry(4, &bufs.uninserted),
+                buf_entry(5, &pick_params),
             ],
         });
 
@@ -339,8 +336,54 @@ impl Pipelines {
         let pick_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("pick_winner"),
             layout: Some(&pick_pl),
-            module: &pick_shader,
+            module: &vote_shader,  // Use vote.wgsl which contains pick_winner_point
             entry_point: Some("pick_winner_point"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Build insert list pipeline ---
+        // Second pass: filters exact winners after pick_winner (prevents duplicates)
+        let build_insert_list_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let build_insert_list_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("build_insert_list_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // vert_tet
+                storage_ro_entry(1),  // tet_to_vert (winner indices from pick_winner)
+                storage_ro_entry(2),  // tet_info
+                storage_rw_entry(3),  // insert_list
+                storage_rw_entry(4),  // counters
+                storage_ro_entry(5),  // uninserted (map position to vertex ID)
+                uniform_entry(6),     // params
+            ],
+        });
+
+        let build_insert_list_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("build_insert_list_bg"),
+            layout: &build_insert_list_bgl,
+            entries: &[
+                buf_entry(0, &bufs.vert_tet),
+                buf_entry(1, &bufs.tet_to_vert),
+                buf_entry(2, &bufs.tet_info),
+                buf_entry(3, &bufs.insert_list),
+                buf_entry(4, &bufs.counters),
+                buf_entry(5, &bufs.uninserted),
+                buf_entry(6, &build_insert_list_params),
+            ],
+        });
+
+        let build_insert_list_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("build_insert_list_pl"),
+            bind_group_layouts: &[&build_insert_list_bgl],
+            push_constant_ranges: &[],
+        });
+
+        let build_insert_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("build_insert_list"),
+            layout: Some(&build_insert_list_pl),
+            module: &vote_shader,  // Use vote.wgsl which contains build_insert_list
+            entry_point: Some("build_insert_list"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -686,13 +729,15 @@ impl Pipelines {
             ),
         });
 
-        let reset_votes_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
+        let reset_votes_params = GpuBuffers::create_params_buffer(device, [max_tets, num_points, 0, 0]);
 
         let reset_votes_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("reset_votes_bgl"),
             entries: &[
                 storage_rw_entry(0),  // tet_vote
-                uniform_entry(1),     // params
+                storage_rw_entry(1),  // vert_sphere
+                storage_rw_entry(2),  // tet_to_vert (NEW: reset winner array)
+                uniform_entry(3),     // params (max_tets, num_uninserted)
             ],
         });
 
@@ -701,7 +746,9 @@ impl Pipelines {
             layout: &reset_votes_bgl,
             entries: &[
                 buf_entry(0, &bufs.tet_vote),
-                buf_entry(1, &reset_votes_params),
+                buf_entry(1, &bufs.vert_sphere),
+                buf_entry(2, &bufs.tet_to_vert),
+                buf_entry(3, &reset_votes_params),
             ],
         });
 
@@ -1294,6 +1341,9 @@ impl Pipelines {
             pick_pipeline,
             pick_bind_group,
             pick_params,
+            build_insert_list_pipeline,
+            build_insert_list_bind_group,
+            build_insert_list_params,
             update_vert_free_pipeline,
             update_vert_free_bind_group,
             update_vert_free_params,

@@ -65,11 +65,12 @@ impl GpuState {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
+        num_uninserted: u32,
     ) {
         queue.write_buffer(
             &self.pipelines.pick_params,
             0,
-            bytemuck::cast_slice(&[self.max_tets, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -78,7 +79,30 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.pick_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.pick_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+    }
+
+    /// Dispatch build insert list (filters exact winners after pick_winner).
+    /// Second pass of CUDA's two-pass winner selection to prevent duplicate insertions.
+    pub fn dispatch_build_insert_list(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+    ) {
+        queue.write_buffer(
+            &self.pipelines.build_insert_list_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("build_insert_list"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.build_insert_list_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.build_insert_list_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 
     /// Dispatch mark split (marks tets being split for concurrent detection).
@@ -132,10 +156,12 @@ impl GpuState {
         let inf_idx = self.num_points + 3; // Super-tet vertices are at [num_points, num_points+3]
         let current_tet_num = self.current_tet_num;
 
+        let params_data = [num_insertions, inf_idx, current_tet_num, 0u32];
+        eprintln!("[DISPATCH_SPLIT] Writing params: {:?}", params_data);
         queue.write_buffer(
             &self.pipelines.split_params,
             0,
-            bytemuck::cast_slice(&[num_insertions, inf_idx, current_tet_num, 0u32]),
+            bytemuck::cast_slice(&params_data),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
