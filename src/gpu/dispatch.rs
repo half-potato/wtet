@@ -127,10 +127,15 @@ impl GpuState {
         queue: &wgpu::Queue,
         num_insertions: u32,
     ) {
+        // params: x = num_insertions, y = inf_idx, z = current_tet_num
+        // inf_idx is the infinity vertex (last of the 4 super-tet vertices)
+        let inf_idx = self.num_points + 3; // Super-tet vertices are at [num_points, num_points+3]
+        let current_tet_num = self.current_tet_num;
+
         queue.write_buffer(
             &self.pipelines.split_params,
             0,
-            bytemuck::cast_slice(&[num_insertions, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[num_insertions, inf_idx, current_tet_num, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -440,6 +445,78 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.relocate_points_fast_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.relocate_points_fast_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+    }
+
+    /// Compact tetras: remove dead tets and rebuild arrays compactly.
+    /// This is a critical post-processing step called before extracting final output.
+    /// Port of GpuDel::compactTetras() from GpuDelaunay.cu:1362-1402
+    ///
+    /// After compaction:
+    /// - All alive tets are moved to indices 0..new_tet_num-1
+    /// - All dead tets are removed
+    /// - Adjacency is updated to use new compacted indices
+    /// - The tetInfoVec can be set to all TET_ALIVE (all tets in range are alive)
+    pub async fn compact_tetras(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        total_tet_num: u32,
+    ) -> u32 {
+        use crate::types::TET_ALIVE;
+
+        log::info!("[COMPACT] Starting tet compaction for {} tets", total_tet_num);
+
+        // Count alive tets and build prefix sum (CUDA does transform_inclusive_scan)
+        let tet_info: Vec<u32> = self.buffers.read_buffer_as(
+            device,
+            queue,
+            &self.buffers.tet_info,
+            total_tet_num as usize
+        ).await;
+
+        // Build prefix sum: prefix[i] = count of alive tets in [0..i]
+        let mut prefix_sum: Vec<u32> = Vec::with_capacity(total_tet_num as usize);
+        let mut count = 0u32;
+        for &flags in &tet_info {
+            if (flags & TET_ALIVE) != 0 {
+                count += 1;
+            }
+            prefix_sum.push(count);
+        }
+
+        let new_tet_num = count;
+        log::info!("[COMPACT] Active tets: {} / {}", new_tet_num, total_tet_num);
+
+        // Upload prefix sum to GPU
+        queue.write_buffer(&self.buffers.prefix_sum_data, 0, bytemuck::cast_slice(&prefix_sum));
+
+        if new_tet_num == total_tet_num {
+            log::info!("[COMPACT] No dead tets, skipping compaction");
+            return new_tet_num;
+        }
+
+        if new_tet_num == 0 {
+            log::warn!("[COMPACT] WARNING: No alive tets found!");
+            return 0;
+        }
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+
+        // Step 1: Collect free slots (dead tet indices)
+        self.dispatch_collect_free_slots(&mut encoder, queue, new_tet_num);
+
+        // Step 2: Make compact map (old index → new index mapping)
+        self.dispatch_make_compact_map(&mut encoder, queue, new_tet_num, total_tet_num);
+
+        // Step 3: Compact tets (physically move alive tets to front)
+        self.dispatch_compact_tets(&mut encoder, queue, new_tet_num, total_tet_num);
+
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::Maintain::Wait);
+
+        log::info!("[COMPACT] ✓ Compaction complete, {} alive tets", new_tet_num);
+
+        new_tet_num
     }
 }
 

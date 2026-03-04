@@ -152,6 +152,7 @@ impl GpuState {
         );
 
         // Check if we have enough pre-allocated space
+        // CRITICAL: WGPU buffers are fixed size (unlike CUDA's dynamic .grow())
         if new_tet_num > self.max_tets {
             eprintln!(
                 "[EXPAND] WARNING: Requested {} tets exceeds max_tets {}!",

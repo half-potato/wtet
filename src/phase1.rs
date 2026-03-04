@@ -50,15 +50,6 @@ pub async fn run(
             println!("[DEBUG] Iteration 2 start: vert_tet = {:?}", vert_tet_debug);
         }
 
-        // Expand tetrahedron list to make room for new insertions
-        // Port of expandTetraList() call from GpuDelaunay.cu:844
-        {
-            let mut encoder = device.create_command_encoder(&Default::default());
-            state.expand_tetra_list(&mut encoder, queue, num_uninserted);
-            queue.submit(Some(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
-        }
-
         // Reset counters for this iteration
         state.reset_inserted_counter(queue);
 
@@ -105,6 +96,13 @@ pub async fn run(
             log::warn!("No points inserted in iteration {} — breaking", iteration);
             break;
         }
+
+        // Expand tetrahedron list to make room for new insertions
+        // Port of expandTetraList() call from GpuDelaunay.cu:844
+        // CRITICAL: Expand by num_inserted (winners this iteration), NOT num_uninserted (all remaining)!
+        // CUDA: expandTetraList( &realInsVertVec, ... ) where realInsVertVec.size() == _insNum
+        let mut encoder = device.create_command_encoder(&Default::default());
+        state.expand_tetra_list(&mut encoder, queue, num_inserted);
 
         println!(
             "[DEBUG] Iteration {}: Inserting {} points (uninserted before removal: {})",

@@ -155,14 +155,16 @@ pub const COUNTER_INSERTED: u32 = 2;
 pub const COUNTER_FAILED: u32 = 3;
 
 /// Encodes a tet index + face index into a single u32.
+/// CRITICAL: Uses 5-bit encoding to match CUDA (see CommonTypes.h:248-265)
 pub fn encode_opp(tet_idx: u32, face: u32) -> u32 {
     debug_assert!(face < 4);
-    (tet_idx << 2) | (face & 3)
+    (tet_idx << 5) | (face & 3) // 5-bit shift, not 2-bit!
 }
 
 /// Decodes a tet index + face index from a packed u32.
+/// CRITICAL: Uses 5-bit encoding to match CUDA (see CommonTypes.h:248-265)
 pub fn decode_opp(packed: u32) -> (u32, u32) {
-    (packed >> 2, packed & 3)
+    (packed >> 5, packed & 3) // 5-bit shift, not 2-bit!
 }
 
 /// Sentinel value meaning "no neighbour" / "invalid".

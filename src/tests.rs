@@ -1667,6 +1667,67 @@ fn test_delaunay_duplicate_points() {
 //   - Delaunay: 0 insphere violations (for interior pairs)
 // ============================================================================
 
+/// Read tets from compacted GPU buffers (after compact_tetras).
+/// After compaction, tets at indices 0..(new_tet_num-1) are all alive and adjacency is already remapped.
+/// Returns (all_points_with_supertet, DelaunayResult).
+#[cfg(test)]
+fn readback_compacted(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    state: &crate::gpu::GpuState,
+    normalized: &[[f32; 3]],
+    new_tet_num: u32,
+) -> (Vec<[f32; 3]>, DelaunayResult) {
+    use crate::types::*;
+
+    eprintln!("[READBACK_COMPACT] Reading {} compacted tets", new_tet_num);
+
+    let count = new_tet_num as usize;
+    let tets_raw = pollster::block_on(state.buffers.read_tets(device, queue, count));
+    let opp_raw = pollster::block_on(state.buffers.read_opp(device, queue, count));
+
+    // After compaction, all tets are alive and adjacency is already correct
+    let mut tets = Vec::with_capacity(count);
+    let mut adjacency = Vec::with_capacity(count);
+
+    for i in 0..count {
+        tets.push(tets_raw[i].v);
+        adjacency.push(opp_raw[i].opp);
+    }
+
+    eprintln!("[READBACK_COMPACT] Successfully read {} tets", tets.len());
+
+    // Debug: Check what vertices are used
+    let mut vertex_set = std::collections::HashSet::new();
+    for tet in &tets {
+        for &v in tet {
+            vertex_set.insert(v);
+        }
+    }
+    eprintln!("[READBACK_COMPACT] Unique vertices used: {:?}", {
+        let mut verts: Vec<_> = vertex_set.iter().copied().collect();
+        verts.sort();
+        verts
+    });
+
+    // Build full point array: normalized + 4 super-tet vertices
+    let big = 100.0f32;
+    let mut all_points: Vec<[f32; 3]> = normalized.to_vec();
+    all_points.push([-big, -big, -big]);
+    all_points.push([4.0 * big, -big, -big]);
+    all_points.push([-big, 4.0 * big, -big]);
+    all_points.push([-big, -big, 4.0 * big]);
+
+    (
+        all_points,
+        DelaunayResult {
+            tets,
+            adjacency,
+            failed_verts: vec![],
+        },
+    )
+}
+
 /// Read all alive tets from raw GPU buffers (including super-tet tets).
 /// Remaps adjacency from buffer indices to output array indices.
 /// Returns (all_points_with_supertet, DelaunayResult).
@@ -1703,8 +1764,15 @@ fn readback_all_alive(
     }
 
     // Remap adjacency from buffer indices to output array indices
+    // CRITICAL: Only process adjacency for alive tets (same tets we added to tets vector)
     let mut adjacency = Vec::with_capacity(tets.len());
-    for opp in &raw_opp {
+    for i in 0..max {
+        // Skip dead tets - must match the filtering above
+        if (info_raw[i].flags & TET_ALIVE) == 0 {
+            continue;
+        }
+
+        let opp = &opp_raw[i].opp; // Use opp_raw (from GPU), not raw_opp (filtered)
         let mut remapped = [INVALID; 4];
         for f in 0..4 {
             let packed = opp[f];
@@ -1718,6 +1786,66 @@ fn readback_all_alive(
             // If neighbor is dead, leave as INVALID
         }
         adjacency.push(remapped);
+    }
+
+    // Verify lengths match
+    assert_eq!(tets.len(), adjacency.len(), "Tets and adjacency lengths must match!");
+
+    // Debug: Analyze boundary faces in detail
+    eprintln!("[READBACK] Found {} alive tets out of {} total", tets.len(), max);
+    let mut boundary_faces = 0;
+    let mut boundary_details = Vec::new();
+
+    // Re-scan alive tets to find boundary faces and their GPU adjacency
+    let mut alive_buf_indices = Vec::new();
+    for i in 0..max {
+        if (info_raw[i].flags & TET_ALIVE) != 0 {
+            alive_buf_indices.push(i);
+        }
+    }
+
+    for (out_idx, &buf_idx) in alive_buf_indices.iter().enumerate() {
+        let opp = &opp_raw[buf_idx].opp;
+        let tet = tets_raw[buf_idx].v;
+
+        for f in 0..4 {
+            let packed = opp[f];
+            if packed == INVALID {
+                // True boundary - no neighbor in GPU buffer
+                boundary_faces += 1;
+                boundary_details.push((out_idx, buf_idx, f, None, tet));
+                continue;
+            }
+
+            let (nei_buf_idx, nei_face) = decode_opp(packed);
+            let nei_buf_idx = nei_buf_idx as usize;
+
+            // Check if neighbor is alive
+            if nei_buf_idx < max && (info_raw[nei_buf_idx].flags & TET_ALIVE) != 0 {
+                // Neighbor is alive - good
+            } else {
+                // Neighbor is dead - this creates a boundary
+                boundary_faces += 1;
+                let nei_flags = if nei_buf_idx < max { info_raw[nei_buf_idx].flags } else { 0 };
+                let nei_tet = if nei_buf_idx < max { tets_raw[nei_buf_idx].v } else { [0,0,0,0] };
+                boundary_details.push((out_idx, buf_idx, f, Some((nei_buf_idx, nei_flags, nei_tet)), tet));
+            }
+        }
+    }
+
+    eprintln!("[READBACK] Boundary faces: {}", boundary_faces);
+    eprintln!("[READBACK] Detailed boundary analysis (first 10):");
+    for (out_idx, buf_idx, face, nei_info, tet) in boundary_details.iter().take(10) {
+        if let Some((nei_buf, nei_flags, nei_tet)) = nei_info {
+            eprintln!("[READBACK]   Tet {} (buf {}), face {}, vertices {:?}",
+                out_idx, buf_idx, face, tet);
+            eprintln!("[READBACK]      → points to DEAD tet buf {} (flags 0x{:x}), vertices {:?}",
+                nei_buf, nei_flags, nei_tet);
+        } else {
+            eprintln!("[READBACK]   Tet {} (buf {}), face {}, vertices {:?}",
+                out_idx, buf_idx, face, tet);
+            eprintln!("[READBACK]      → has INVALID adjacency (no neighbor in GPU)");
+        }
     }
 
     // Build full point array: normalized + 4 super-tet vertices
@@ -1752,7 +1880,14 @@ fn run_phase1_raw(
     let mut state =
         pollster::block_on(crate::gpu::GpuState::new(device, queue, &normalized, config));
     pollster::block_on(crate::phase1::run(device, queue, &mut state, config));
-    readback_all_alive(device, queue, &state, &normalized)
+
+    // CRITICAL: Compact tetras before readback (removes dead tets, rebuilds adjacency)
+    // This matches CUDA's outputToHost() which calls compactTetras() before copying to CPU
+    eprintln!("[TEST] About to compact {} tets", state.current_tet_num);
+    let new_tet_num = pollster::block_on(state.compact_tetras(device, queue, state.current_tet_num));
+    eprintln!("[TEST] Compaction returned {} alive tets", new_tet_num);
+
+    readback_compacted(device, queue, &state, &normalized, new_tet_num)
 }
 
 /// Check Euler characteristic for closed manifold (S^3): V-E+F-T = 0.

@@ -23,7 +23,7 @@
 @group(0) @binding(3) var<storage, read_write> vert_tet: array<u32>;
 @group(0) @binding(4) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
 @group(0) @binding(5) var<storage, read_write> free_arr: array<u32>;
-@group(0) @binding(6) var<storage, read_write> vert_free_arr: array<u32>;
+@group(0) @binding(6) var<storage, read_write> vert_free_arr: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read_write> flip_queue: array<u32>; // tets needing flip check
 @group(0) @binding(9) var<storage, read_write> tet_to_vert: array<u32>; // maps old_tet_idx -> vertex being inserted (or INVALID)
@@ -82,25 +82,40 @@ fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
 }
 
 // Get 4 free tet slots
-fn get_free_slots_4tet(vertex: u32) -> vec4<u32> {
-    let count = vert_free_arr[vertex];
+// Port of CUDA's allocation logic from kerAllocateFlip23Slot (KerDivision.cu:927-948)
+fn get_free_slots_4tet(vertex: u32, inf_idx: u32, tet_num: u32) -> vec4<u32> {
+    var slots: vec4<u32>;
 
-    // Check if enough free slots
-    if count < 4u {
-        return vec4<u32>(0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu, 0xFFFFFFFFu);
+    // Allocate 4 slots, trying vertex free list first, then infinity block, then expansion
+    for (var i = 0u; i < 4u; i++) {
+        var free_idx: u32 = 0xFFFFFFFFu;
+
+        // CUDA line 927: Try vertex's free list first
+        let loc_idx = i32(atomicSub(&vert_free_arr[vertex], 1u)) - 1;
+
+        if loc_idx >= 0 {
+            // CUDA line 931: Use slot from vertex's free list
+            free_idx = free_arr[vertex * MEAN_VERTEX_DEGREE + u32(loc_idx)];
+        } else {
+            // CUDA line 935: Reset counter
+            atomicStore(&vert_free_arr[vertex], 0u);
+
+            // CUDA line 942: Try infinity block
+            let inf_loc_idx = i32(atomicSub(&vert_free_arr[inf_idx], 1u)) - 1;
+
+            if inf_loc_idx >= 0 {
+                // CUDA line 945: Use slot from infinity block
+                free_idx = free_arr[inf_idx * MEAN_VERTEX_DEGREE + u32(inf_loc_idx)];
+            } else {
+                // CUDA line 948: Expand - allocate from new range
+                // freeIdx = tetNum - locIdx - 1
+                free_idx = tet_num - u32(-inf_loc_idx) - 1u;
+            }
+        }
+
+        slots[i] = free_idx;
     }
 
-    // Compute top of available slots based on current count
-    let block_base = vertex * MEAN_VERTEX_DEGREE;
-    let top = block_base + count - 1u;
-
-    var slots: vec4<u32>;
-    slots.x = free_arr[top];
-    slots.y = free_arr[top - 1u];
-    slots.z = free_arr[top - 2u];
-    slots.w = free_arr[top - 3u];
-
-    vert_free_arr[vertex] = count - 4u;
     return slots;
 }
 
@@ -137,7 +152,10 @@ fn split_tetra(
     let v3 = orig.w;
 
     // Allocate 4 new tet slots
-    let new_slots = get_free_slots_4tet(p);
+    // params: x = num_insertions, y = inf_idx, z = current_tet_num
+    let inf_idx = params.y;
+    let tet_num = params.z;
+    let new_slots = get_free_slots_4tet(p, inf_idx, tet_num);
     let t0 = new_slots.x;
     let t1 = new_slots.y;
     let t2 = new_slots.z;

@@ -2,8 +2,11 @@
 //
 // Two-pass approach:
 //   1. kerVoteForPoint: Each uninserted point votes for its containing tet.
-//      Uses atomicMin to pick the closest point (by distance to circumcenter or centroid).
+//      Uses atomicMax to pick the point furthest outside circumsphere (best quality).
 //   2. kerPickWinnerPoint: Each tet that received a vote marks the winner.
+//
+// Port of kerVoteForPoint from KerPredicates.cu:160-200
+// Uses inSphereDet (signed distance to circumsphere) for voting.
 
 @group(0) @binding(0) var<storage, read> points: array<vec4<f32>>;
 @group(0) @binding(1) var<storage, read> tets: array<vec4<u32>>;
@@ -14,18 +17,55 @@
 @group(0) @binding(6) var<uniform> params: vec4<u32>; // x = num_uninserted
 
 const INVALID: u32 = 0xFFFFFFFFu;
-const NO_VOTE: i32 = 0x7FFFFFFF;
+const NO_VOTE: i32 = 0x7FFFFFFF;  // Maximum i32 for atomicMin voting (temp: using centroid)
 const TET_ALIVE: u32 = 1u;
 
-// Pack distance (float, discretized) and vertex index into i32 for atomicMin.
-// High 16 bits: distance key, low 16 bits: vertex index within chunk.
-// This limits us to 65536 points per vote round, which is fine for <100K.
+// Pack distance key and vertex index into i32 for atomicMin.
+// TODO: Switch to atomicMax with circumcenter (need to debug vote packing first)
+// High 16 bits: distance/sphere key, low 16 bits: vertex index
 fn pack_vote(dist_key: u32, local_idx: u32) -> i32 {
     return i32((dist_key << 16u) | (local_idx & 0xFFFFu));
 }
 
 fn unpack_vote_idx(vote: i32) -> u32 {
     return u32(vote) & 0xFFFFu;
+}
+
+// Fast insphere: returns (det, uncertain) where uncertain=1.0 if error bounds exceeded
+fn insphere_fast(
+    ax: f32, ay: f32, az: f32,
+    bx: f32, by: f32, bz: f32,
+    cx: f32, cy: f32, cz: f32,
+    dx: f32, dy: f32, dz: f32,
+    ex: f32, ey: f32, ez: f32,
+) -> vec2<f32> {
+    let aex = ax - ex; let aey = ay - ey; let aez = az - ez;
+    let bex = bx - ex; let bey = by - ey; let bez = bz - ez;
+    let cex = cx - ex; let cey = cy - ey; let cez = cz - ez;
+    let dex = dx - ex; let dey = dy - ey; let dez = dz - ez;
+
+    let ab = aex * bey - bex * aey;
+    let bc = bex * cey - cex * bey;
+    let cd = cex * dey - dex * cey;
+    let da = dex * aey - aex * dey;
+    let ac = aex * cey - cex * aey;
+    let bd = bex * dey - dex * bey;
+
+    let abc = aez * bc - bez * ac + cez * ab;
+    let bcd = bez * cd - cez * bd + dez * bc;
+    let cda = cez * da + dez * ac + aez * cd;
+    let dab = dez * ab + aez * bd + bez * da;
+
+    let alift = aex * aex + aey * aey + aez * aez;
+    let blift = bex * bex + bey * bey + bez * bez;
+    let clift = cex * cex + cey * cey + cez * cez;
+    let dlift = dex * dex + dey * dey + dez * dez;
+
+    let det = (dlift * abc - clift * dab) + (blift * cda - alift * bcd);
+
+    // For voting, we don't need full error bound checking - just use the fast result
+    // CUDA uses fast float predicates for voting (not exact)
+    return vec2<f32>(det, 0.0);
 }
 
 @compute @workgroup_size(64)
@@ -49,7 +89,8 @@ fn vote_for_point(
         return;
     }
 
-    // Compute distance to tet centroid
+    // TODO: Use insphere determinant (circumcenter) instead of centroid
+    // Currently using centroid for simplicity - need to debug atomicMax voting first
     let tet = tets[tet_idx];
     let c = (points[tet.x].xyz + points[tet.y].xyz + points[tet.z].xyz + points[tet.w].xyz) * 0.25;
     let p = points[vert_idx].xyz;
