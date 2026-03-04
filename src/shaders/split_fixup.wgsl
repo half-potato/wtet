@@ -15,7 +15,7 @@
 const INVALID: u32 = 0xFFFFFFFFu;
 
 fn decode_opp_tet(packed: u32) -> u32 {
-    return packed >> 2u;
+    return packed >> 5u;
 }
 
 fn decode_opp_face(packed: u32) -> u32 {
@@ -23,7 +23,7 @@ fn decode_opp_face(packed: u32) -> u32 {
 }
 
 fn encode_opp(tet_idx: u32, face: u32) -> u32 {
-    return (tet_idx << 2u) | (face & 3u);
+    return (tet_idx << 5u) | (face & 3u);
 }
 
 fn get_opp(tet_idx: u32, face: u32) -> u32 {

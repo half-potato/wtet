@@ -60,11 +60,11 @@ fn debug_slot(tid: u32, slot: u32, values: vec4<u32>) {
 }
 
 fn encode_opp(tet_idx: u32, face: u32) -> u32 {
-    return (tet_idx << 2u) | (face & 3u);
+    return (tet_idx << 5u) | (face & 3u);
 }
 
 fn decode_opp_tet(packed: u32) -> u32 {
-    return packed >> 2u;
+    return packed >> 5u;
 }
 
 fn decode_opp_face(packed: u32) -> u32 {
@@ -154,13 +154,18 @@ fn split_tetra(
 
     breadcrumb(tid, CRUMB_BEFORE_WRITE);
 
-    // Write the 4 new tets
-    tets[t0] = vec4<u32>(p, v1, v2, v3);
+    // Write the 4 new tets using CUDA's TetViAsSeenFrom permutation
+    // CUDA: newTet[vi] = { tet._v[TetViAsSeenFrom[vi][0]],
+    //                       tet._v[TetViAsSeenFrom[vi][1]],
+    //                       tet._v[TetViAsSeenFrom[vi][2]],
+    //                       splitVertex }
+    // TetViAsSeenFrom: {1,3,2}, {0,2,3}, {0,3,1}, {0,1,2}
+    tets[t0] = vec4<u32>(v1, v3, v2, p);  // vi=0: AsSeenFrom[0] = {1,3,2}
     breadcrumb(tid, CRUMB_AFTER_WRITE_T0);
 
-    tets[t1] = vec4<u32>(v0, p, v2, v3);
-    tets[t2] = vec4<u32>(v0, v1, p, v3);
-    tets[t3] = vec4<u32>(v0, v1, v2, p);
+    tets[t1] = vec4<u32>(v0, v2, v3, p);  // vi=1: AsSeenFrom[1] = {0,2,3}
+    tets[t2] = vec4<u32>(v0, v3, v1, p);  // vi=2: AsSeenFrom[2] = {0,3,1}
+    tets[t3] = vec4<u32>(v0, v1, v2, p);  // vi=3: AsSeenFrom[3] = {0,1,2}
 
     breadcrumb(tid, CRUMB_AFTER_WRITE_ALL);
 
@@ -169,52 +174,45 @@ fn split_tetra(
 
     breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);
 
-    // Internal adjacency:
-    // Tk's face opposite P (face k in Tk) connects to external neighbour.
-    // Tk's face opposite vi (i != k) connects to Ti.
-    //
-    // For T0 (P, v1, v2, v3):
-    //   face 0 (opp P) = external = orig_opp[0] (was opp v0)
-    //   face 1 (opp v1) = T1's face 0 (opp v0 in T1... wait)
-    //
-    // Let's think about this more carefully.
-    // In Tk, vertex k has been replaced by P.
-    // The face opposite to P in Tk is face k (the face that doesn't include P).
-    //   This face has the same 3 vertices as face k in the original tet.
-    //   So its external neighbour is orig_opp[k].
-    //
-    // The face opposite to vi (i != k) in Tk includes P and the other 2 vertices.
-    //   This face is shared with Ti (where vi was replaced by P).
-    //   Specifically, face i in Tk connects to face k in Ti.
+    // Internal adjacency using CUDA's IntSplitFaceOpp table:
+    // IntSplitFaceOpp[4][6] = {
+    //   {1, 0, 3, 0, 2, 0},  // vi=0
+    //   {0, 0, 2, 2, 3, 1},  // vi=1
+    //   {0, 2, 3, 2, 1, 1},  // vi=2
+    //   {0, 1, 1, 2, 2, 1}   // vi=3
+    // }
+    // For each tet vi:
+    //   face 0 -> newTet[IntSplitFaceOpp[vi][0]], face IntSplitFaceOpp[vi][1]
+    //   face 1 -> newTet[IntSplitFaceOpp[vi][2]], face IntSplitFaceOpp[vi][3]
+    //   face 2 -> newTet[IntSplitFaceOpp[vi][4]], face IntSplitFaceOpp[vi][5]
+    //   face 3 -> external (original opposite face)
 
-    // T0 adjacency:
-    set_opp_at(t0, 0u, orig_opp_0);           // face 0: external (was opp v0)
-    set_opp_at(t0, 1u, encode_opp(t1, 0u));   // face 1: T1's face 0
+    // T0 (vi=0) adjacency: IntSplitFaceOpp[0] = {1, 0, 3, 0, 2, 0}
+    set_opp_at(t0, 0u, encode_opp(t1, 0u));   // face 0: T1's face 0
+    set_opp_at(t0, 1u, encode_opp(t3, 0u));   // face 1: T3's face 0
     set_opp_at(t0, 2u, encode_opp(t2, 0u));   // face 2: T2's face 0
-    set_opp_at(t0, 3u, encode_opp(t3, 0u));   // face 3: T3's face 0
+    set_opp_at(t0, 3u, orig_opp_0);           // face 3: external (was opp v0)
 
-    // T1 adjacency:
-    set_opp_at(t1, 0u, encode_opp(t0, 1u));   // face 0: T0's face 1
-    set_opp_at(t1, 1u, orig_opp_1);           // face 1: external (was opp v1)
-    set_opp_at(t1, 2u, encode_opp(t2, 1u));   // face 2: T2's face 1
-    set_opp_at(t1, 3u, encode_opp(t3, 1u));   // face 3: T3's face 1
+    // T1 (vi=1) adjacency: IntSplitFaceOpp[1] = {0, 0, 2, 2, 3, 1}
+    set_opp_at(t1, 0u, encode_opp(t0, 0u));   // face 0: T0's face 0
+    set_opp_at(t1, 1u, encode_opp(t2, 2u));   // face 1: T2's face 2
+    set_opp_at(t1, 2u, encode_opp(t3, 1u));   // face 2: T3's face 1
+    set_opp_at(t1, 3u, orig_opp_1);           // face 3: external (was opp v1)
 
-    // T2 adjacency:
+    // T2 (vi=2) adjacency: IntSplitFaceOpp[2] = {0, 2, 3, 2, 1, 1}
     set_opp_at(t2, 0u, encode_opp(t0, 2u));   // face 0: T0's face 2
-    set_opp_at(t2, 1u, encode_opp(t1, 2u));   // face 1: T1's face 2
-    set_opp_at(t2, 2u, orig_opp_2);           // face 2: external (was opp v2)
-    set_opp_at(t2, 3u, encode_opp(t3, 2u));   // face 3: T3's face 2
+    set_opp_at(t2, 1u, encode_opp(t3, 2u));   // face 1: T3's face 2
+    set_opp_at(t2, 2u, encode_opp(t1, 1u));   // face 2: T1's face 1
+    set_opp_at(t2, 3u, orig_opp_2);           // face 3: external (was opp v2)
 
-    // T3 adjacency:
-    set_opp_at(t3, 0u, encode_opp(t0, 3u));   // face 0: T0's face 3
-    set_opp_at(t3, 1u, encode_opp(t1, 3u));   // face 1: T1's face 3
-    set_opp_at(t3, 2u, encode_opp(t2, 3u));   // face 2: T2's face 3
+    // T3 (vi=3) adjacency: IntSplitFaceOpp[3] = {0, 1, 1, 2, 2, 1}
+    set_opp_at(t3, 0u, encode_opp(t0, 1u));   // face 0: T0's face 1
+    set_opp_at(t3, 1u, encode_opp(t1, 2u));   // face 1: T1's face 2
+    set_opp_at(t3, 2u, encode_opp(t2, 1u));   // face 2: T2's face 1
     set_opp_at(t3, 3u, orig_opp_3);           // face 3: external (was opp v3)
 
     // Update external neighbours to point back to us.
-    // TEMPORARILY DISABLED: This causes race conditions when multiple threads split the same tet
-    // TODO: Fix voting system to ensure only 1 winner per tet, OR implement atomic claiming
-    /*
+    // Uses tet_to_vert to detect concurrent splits (CUDA: KerDivision.cu:140-162)
     let ext_opps = array<u32, 4>(orig_opp_0, orig_opp_1, orig_opp_2, orig_opp_3);
     let new_tets = array<u32, 4>(t0, t1, t2, t3);
 
@@ -225,10 +223,22 @@ fn split_tetra(
             var nei_tet = decode_opp_tet(ext_opp);
             var nei_face = decode_opp_face(ext_opp);
 
+            // Check if neighbor is splitting concurrently
+            let nei_split_idx = tet_to_vert[nei_tet];
+
+            if nei_split_idx != INVALID {
+                // Neighbor has split - use free_arr to find correct new tet
+                let nei_split_vert = insert_list[nei_split_idx].y;  // vertex being inserted
+                let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
+
+                nei_tet = free_arr[nei_free_idx - nei_face];
+                nei_face = 3u;  // External faces become face 3 after split
+            }
+
+            // Point neighbor back to this new tet (safe whether split or not)
             set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], k));
         }
     }
-    */
 
     breadcrumb(tid, CRUMB_AFTER_ADJACENCY);
 

@@ -62,6 +62,14 @@ pub async fn run(
         // Reset counters for this iteration
         state.reset_inserted_counter(queue);
 
+        // CUDA FLOW (GpuDelaunay.cu:788-831):
+        // 1. kerVoteForPoint - vote using CURRENT vert_tet (from prev iteration or init)
+        // 2. kerPickWinnerPoint - vertex-parallel winner selection
+        // 3. kerNegateInsertedVerts - mark winners
+        // 4. thrust_copyIf_Insertable - collect winners
+        // 5. thrust::gather - get vertex IDs
+        // Note: NO point location before voting! Vertices vote for their current tets.
+
         // Encode the insertion pipeline
         let mut encoder = device.create_command_encoder(&Default::default());
 
@@ -71,28 +79,13 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 2. Point location (find containing tet for each uninserted point)
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_locate(&mut encoder, queue, num_uninserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
-
-        // Debug: Check vert_tet after locate
-        if iteration == 2 {
-            let vert_tet_after_locate: Vec<u32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.vert_tet, state.uninserted.len())
-                .await;
-            println!("[DEBUG] Iteration 2 after locate: vert_tet = {:?}", vert_tet_after_locate);
-        }
-
-        // 3. Vote (each vertex votes for its tet)
+        // 2. Vote (each vertex votes for its CURRENT tet - no locate first!)
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_vote(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
 
-        // 4. Pick winners (determine winning vertex per tet and build insert list)
+        // 3. Pick winners (determine winning vertex per tet and build insert list)
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_pick_winner(&mut encoder, queue);
         queue.submit(Some(encoder.finish()));
@@ -156,16 +149,24 @@ pub async fn run(
 
         // Note: We don't update vert_tet here because it will be done at the start of the next iteration
 
-        // 6. Flip checking (optional, iterative) - PROPER 6-STEP CUDA FLOW
+        // 6. Flip checking (optional, iterative) - TWO-PHASE FLIPPING
         if config.enable_flipping {
-            // TODO: Mark special tets before flipping (clears special adjacency markers)
-            // state.dispatch_mark_special_tets(&mut encoder, queue);
+            // CUDA two-phase flipping:
+            // Phase 1: doFlippingLoop(Fast) - f32 predicates for 99%+ of cases
+            // Phase 2: markSpecialTets() → doFlippingLoop(Exact) - DD + SoS for degenerate cases
 
             // Initialize active tet vector with newly split tets (4 per insertion)
             // TODO: Populate act_tet_vec from split operation
             let mut flip_queue_size = num_inserted * 4;
             let vote_offset = 0u32; // TODO: Implement vote offset management
             let use_alternate = false; // TODO: Implement double buffering if needed
+
+            // Track flip batch boundaries for relocateAll
+            let mut org_flip_num: Vec<u32> = Vec::new();
+            let mut total_flips = 0u32;
+
+            // ========== PHASE 1: FAST FLIPPING (f32 predicates) ==========
+            eprintln!("[FLIP] Starting fast flipping phase with {} initial tets", flip_queue_size);
 
             for flip_iter in 0..config.max_flip_iterations {
                 if flip_queue_size == 0 {
@@ -227,16 +228,135 @@ pub async fn run(
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::Maintain::Wait);
 
+                // Track this batch boundary for relocateAll
+                org_flip_num.push(total_flips);
+                total_flips += flip_count;
+
                 // Read back how many tets were enqueued for the next round
                 let new_count = state.buffers.read_flip_count(device, queue).await;
                 flip_queue_size = new_count;
             }
 
-            // CRITICAL: Relocate points after flipping (updates vert_tet for points whose tets flipped)
+            eprintln!("[FLIP] Fast phase complete: {} total flips", total_flips);
+
+            // ========== PHASE 2: EXACT FLIPPING (DD + SoS for degenerate cases) ==========
+            // Mark tets that had uncertain predicates (OPP_SPECIAL flag set by fast phase)
+            eprintln!("[FLIP] Checking for special tets requiring exact predicates...");
             let mut encoder = device.create_command_encoder(&Default::default());
-            state.dispatch_relocate_points_fast(&mut encoder, queue, num_uninserted);
+            state.dispatch_mark_special_tets(&mut encoder, queue, state.max_tets);
             queue.submit(Some(encoder.finish()));
             device.poll(wgpu::Maintain::Wait);
+
+            // Count how many special tets need exact processing
+            let special_tet_count = state.buffers.read_compact_count(device, queue).await;
+            eprintln!("[FLIP] Special tet count: {}", special_tet_count);
+
+            if special_tet_count == 0 {
+                eprintln!("[FLIP] No special tets - fast phase was sufficient");
+            } else {
+                eprintln!("[FLIP] Found {} special tets requiring exact predicates", special_tet_count);
+
+                flip_queue_size = special_tet_count;
+
+                for flip_iter in 0..config.max_flip_iterations {
+                    if flip_queue_size == 0 {
+                        break;
+                    }
+
+                    // Reset compaction counters
+                    state.reset_inserted_counter(queue);
+
+                    let mut encoder = device.create_command_encoder(&Default::default());
+
+                    // STEP 1: VOTE - Check Delaunay violations with exact predicates
+                    state.dispatch_check_delaunay_exact(&mut encoder, queue, flip_queue_size, vote_offset);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // STEP 2: VALIDATE - Mark rejected flips
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // STEP 3: COMPACT - Remove rejected flips
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // Read compacted flip count
+                    let flip_count = state.buffers.read_compact_count(device, queue).await;
+
+                    eprintln!(
+                        "[FLIP-EXACT] Iteration {}: {} active -> {} valid flips",
+                        flip_iter,
+                        flip_queue_size,
+                        flip_count
+                    );
+
+                    if flip_count == 0 {
+                        break;
+                    }
+
+                    // STEP 4: ALLOCATE - Reserve slots for 2-3 flips
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    let inf_idx = state.max_tets;
+                    state.dispatch_allocate_flip23_slot(&mut encoder, queue, flip_count, inf_idx, state.max_tets);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // STEP 5: FLIP - Perform the flips
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_flip(&mut encoder, queue, flip_count, use_alternate);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // STEP 6: UPDATE - Fix adjacency
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_update_opp(&mut encoder, queue, 0, flip_count);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    // Track this batch boundary for relocateAll
+                    org_flip_num.push(total_flips);
+                    total_flips += flip_count;
+
+                    // Read back how many tets were enqueued for the next round
+                    let new_count = state.buffers.read_flip_count(device, queue).await;
+                    flip_queue_size = new_count;
+                }
+
+                eprintln!("[FLIP] Exact phase complete: {} additional flips, {} total", total_flips - org_flip_num.last().copied().unwrap_or(0), total_flips);
+            }
+
+            // CRITICAL: Relocate points after flipping (updates vert_tet for points whose tets flipped)
+            // Port of GpuDel::relocateAll() from GpuDelaunay.cu:1250-1311
+            if total_flips > 0 {
+                // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
+                let init_data = vec![-1i32; state.max_tets as usize];
+                queue.write_buffer(&state.buffers.tet_to_flip, 0, bytemuck::cast_slice(&init_data));
+
+                // Build flip traces by iterating batches in REVERSE order
+                let mut next_flip_num = total_flips;
+                for i in (0..org_flip_num.len()).rev() {
+                    let prev_flip_num = org_flip_num[i];
+                    let flip_num = next_flip_num - prev_flip_num;
+
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_update_flip_trace(&mut encoder, queue, prev_flip_num, flip_num);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::Maintain::Wait);
+
+                    next_flip_num = prev_flip_num;
+                }
+
+                // Now relocate points using the flip trace chains
+                let mut encoder = device.create_command_encoder(&Default::default());
+                state.dispatch_relocate_points_fast(&mut encoder, queue, num_uninserted);
+                queue.submit(Some(encoder.finish()));
+                device.poll(wgpu::Maintain::Wait);
+            }
         }
 
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
@@ -318,17 +438,12 @@ async fn read_inserted_verts(
         return Vec::new();
     }
 
-    // insert_list is vec2<u32> (tet_idx, position) — pair[1] is position in uninserted array
+    // insert_list is vec2<u32> (tet_idx, vert_idx) — pair[1] is already the vertex ID
     let raw: Vec<[u32; 2]> = state
         .buffers
         .read_buffer_as(device, queue, &state.buffers.insert_list, count)
         .await;
 
-    // Convert positions to actual vertex indices
-    raw.iter()
-        .map(|pair| {
-            let position = pair[1] as usize;
-            state.uninserted[position]
-        })
-        .collect()
+    // Extract vertex IDs directly (no conversion needed)
+    raw.iter().map(|pair| pair[1]).collect()
 }

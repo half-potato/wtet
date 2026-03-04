@@ -68,6 +68,11 @@ pub struct Pipelines {
     pub check_delaunay_fast_bind_group: wgpu::BindGroup,
     pub check_delaunay_fast_params: wgpu::Buffer,
 
+    // Pipeline: check delaunay exact (flip voting with DD + SoS)
+    pub check_delaunay_exact_pipeline: wgpu::ComputePipeline,
+    pub check_delaunay_exact_bind_group: wgpu::BindGroup,
+    pub check_delaunay_exact_params: wgpu::Buffer,
+
     // Pipeline: allocate flip23 slot
     pub allocate_flip23_slot_pipeline: wgpu::ComputePipeline,
     pub allocate_flip23_slot_bind_group: wgpu::BindGroup,
@@ -87,6 +92,31 @@ pub struct Pipelines {
     pub update_opp_pipeline: wgpu::ComputePipeline,
     pub update_opp_bind_group: wgpu::BindGroup,
     pub update_opp_params: wgpu::Buffer,
+
+    // Pipeline: update flip trace (build flip history chains for relocateAll)
+    pub update_flip_trace_pipeline: wgpu::ComputePipeline,
+    pub update_flip_trace_bind_group: wgpu::BindGroup,
+    pub update_flip_trace_params: wgpu::Buffer,
+
+    // Pipeline: collect free slots (compactTetras step 1)
+    pub collect_free_slots_pipeline: wgpu::ComputePipeline,
+    pub collect_free_slots_bind_group: wgpu::BindGroup,
+    pub collect_free_slots_params: wgpu::Buffer,
+
+    // Pipeline: make compact map (compactTetras step 2)
+    pub make_compact_map_pipeline: wgpu::ComputePipeline,
+    pub make_compact_map_bind_group: wgpu::BindGroup,
+    pub make_compact_map_params: wgpu::Buffer,
+
+    // Pipeline: compact tets (compactTetras step 3)
+    pub compact_tets_pipeline: wgpu::ComputePipeline,
+    pub compact_tets_bind_group: wgpu::BindGroup,
+    pub compact_tets_params: wgpu::Buffer,
+
+    // Pipeline: mark special tets (between fast/exact flipping)
+    pub mark_special_tets_pipeline: wgpu::ComputePipeline,
+    pub mark_special_tets_bind_group: wgpu::BindGroup,
+    pub mark_special_tets_params: wgpu::Buffer,
 
     // Pipeline: mark rejected flips
     pub mark_rejected_flips_pipeline: wgpu::ComputePipeline,
@@ -280,7 +310,8 @@ impl Pipelines {
                 storage_ro_entry(3),  // uninserted
                 storage_rw_entry(4),  // insert_list
                 storage_rw_entry(5),  // counters
-                uniform_entry(6),     // params
+                storage_ro_entry(6),  // vert_tet (ADDED for vertex-parallel iteration)
+                uniform_entry(7),     // params
             ],
         });
 
@@ -294,7 +325,8 @@ impl Pipelines {
                 buf_entry(3, &bufs.uninserted),
                 buf_entry(4, &bufs.insert_list),
                 buf_entry(5, &bufs.counters),
-                buf_entry(6, &pick_params),
+                buf_entry(6, &bufs.vert_tet),
+                buf_entry(7, &pick_params),
             ],
         });
 
@@ -877,7 +909,13 @@ impl Pipelines {
         let mark_special_tets_params = GpuBuffers::create_params_buffer(device, [max_tets, 0, 0, 0]);
         let mark_special_tets_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("mark_special_tets_bgl"),
-            entries: &[storage_rw_entry(0), storage_rw_entry(1), uniform_entry(2)],
+            entries: &[
+                storage_rw_entry(0),  // tet_info
+                storage_rw_entry(1),  // tet_opp
+                storage_rw_entry(2),  // act_tet_vec
+                storage_rw_entry(3),  // counters
+                uniform_entry(4),     // params
+            ],
         });
         let mark_special_tets_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("mark_special_tets_bg"),
@@ -885,7 +923,9 @@ impl Pipelines {
             entries: &[
                 buf_entry(0, &bufs.tet_info),
                 buf_entry(1, &bufs.tet_opp),
-                buf_entry(2, &mark_special_tets_params),
+                buf_entry(2, &bufs.act_tet_vec),
+                buf_entry(3, &bufs.counters),
+                buf_entry(4, &mark_special_tets_params),
             ],
         });
         let mark_special_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -931,264 +971,6 @@ impl Pipelines {
             layout: Some(&update_flip_trace_pl),
             module: &update_flip_trace_shader,
             entry_point: Some("update_flip_trace"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 6-11: Block allocation & index shifting ---
-
-        // --- 6. update_block_vert_free_list ---
-        let update_block_vert_free_list_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("update_block_vert_free_list.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_block_vert_free_list.wgsl").into()),
-        });
-        let update_block_vert_free_list_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let update_block_vert_free_list_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("update_block_vert_free_list_bgl"),
-            entries: &[
-                storage_ro_entry(0),  // ins_tet_vec
-                storage_rw_entry(1),  // vert_free_arr
-                storage_rw_entry(2),  // free_arr
-                storage_ro_entry(3),  // scatter_map
-                uniform_entry(4),     // params
-            ],
-        });
-        let update_block_vert_free_list_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("update_block_vert_free_list_bg"),
-            layout: &update_block_vert_free_list_bgl,
-            entries: &[
-                buf_entry(0, &bufs.ins_vert_vec),
-                buf_entry(1, &bufs.vert_free_arr),
-                buf_entry(2, &bufs.free_arr),
-                buf_entry(3, &bufs.scatter_arr),
-                buf_entry(4, &update_block_vert_free_list_params),
-            ],
-        });
-        let update_block_vert_free_list_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("update_block_vert_free_list_pl"),
-            bind_group_layouts: &[&update_block_vert_free_list_bgl],
-            push_constant_ranges: &[],
-        });
-        let update_block_vert_free_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("update_block_vert_free_list"),
-            layout: Some(&update_block_vert_free_list_pl),
-            module: &update_block_vert_free_list_shader,
-            entry_point: Some("update_block_vert_free_list"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 7. update_block_opp_tet_idx ---
-        let update_block_opp_tet_idx_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("update_block_opp_tet_idx.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_block_opp_tet_idx.wgsl").into()),
-        });
-        let update_block_opp_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let update_block_opp_tet_idx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("update_block_opp_tet_idx_bgl"),
-            entries: &[
-                storage_rw_entry(0),  // opp_arr
-                storage_ro_entry(1),  // order_arr
-                uniform_entry(2),     // params
-            ],
-        });
-        let update_block_opp_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("update_block_opp_tet_idx_bg"),
-            layout: &update_block_opp_tet_idx_bgl,
-            entries: &[
-                buf_entry(0, &bufs.tet_opp),
-                buf_entry(1, &bufs.order_arr),
-                buf_entry(2, &update_block_opp_tet_idx_params),
-            ],
-        });
-        let update_block_opp_tet_idx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("update_block_opp_tet_idx_pl"),
-            bind_group_layouts: &[&update_block_opp_tet_idx_bgl],
-            push_constant_ranges: &[],
-        });
-        let update_block_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("update_block_opp_tet_idx"),
-            layout: Some(&update_block_opp_tet_idx_pl),
-            module: &update_block_opp_tet_idx_shader,
-            entry_point: Some("update_block_opp_tet_idx"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 8. shift_inf_free_idx ---
-        let shift_inf_free_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let shift_inf_free_idx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shift_inf_free_idx_bgl"),
-            entries: &[
-                storage_rw_entry(0),  // vert_free_arr
-                storage_rw_entry(1),  // free_arr
-                uniform_entry(2),     // params
-            ],
-        });
-        let shift_inf_free_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shift_inf_free_idx_bg"),
-            layout: &shift_inf_free_idx_bgl,
-            entries: &[
-                buf_entry(0, &bufs.vert_free_arr),
-                buf_entry(1, &bufs.free_arr),
-                buf_entry(2, &shift_inf_free_idx_params),
-            ],
-        });
-        let shift_inf_free_idx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shift_inf_free_idx_pl"),
-            bind_group_layouts: &[&shift_inf_free_idx_bgl],
-            push_constant_ranges: &[],
-        });
-        let shift_inf_free_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("shift_inf_free_idx"),
-            layout: Some(&shift_inf_free_idx_pl),
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("shift_inf_free_idx.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_inf_free_idx.wgsl").into()),
-            }),
-            entry_point: Some("shift_inf_free_idx"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 9. shift_opp_tet_idx ---
-        let shift_opp_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let shift_opp_tet_idx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shift_opp_tet_idx_bgl"),
-            entries: &[
-                storage_rw_entry(0),  // tet_opp
-                uniform_entry(1),     // params
-            ],
-        });
-        let shift_opp_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shift_opp_tet_idx_bg"),
-            layout: &shift_opp_tet_idx_bgl,
-            entries: &[
-                buf_entry(0, &bufs.tet_opp),
-                buf_entry(1, &shift_opp_tet_idx_params),
-            ],
-        });
-        let shift_opp_tet_idx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shift_opp_tet_idx_pl"),
-            bind_group_layouts: &[&shift_opp_tet_idx_bgl],
-            push_constant_ranges: &[],
-        });
-        let shift_opp_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("shift_opp_tet_idx"),
-            layout: Some(&shift_opp_tet_idx_pl),
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("shift_opp_tet_idx.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_opp_tet_idx.wgsl").into()),
-            }),
-            entry_point: Some("shift_opp_tet_idx"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 10. shift_tet_idx ---
-        let shift_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let shift_tet_idx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("shift_tet_idx_bgl"),
-            entries: &[
-                storage_rw_entry(0),  // idx_arr (generic array of i32 tet indices)
-                uniform_entry(1),     // params
-            ],
-        });
-        let shift_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("shift_tet_idx_bg"),
-            layout: &shift_tet_idx_bgl,
-            entries: &[
-                buf_entry(0, &bufs.vote_arr),  // Can be reused for different arrays
-                buf_entry(1, &shift_tet_idx_params),
-            ],
-        });
-        let shift_tet_idx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("shift_tet_idx_pl"),
-            bind_group_layouts: &[&shift_tet_idx_bgl],
-            push_constant_ranges: &[],
-        });
-        let shift_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("shift_tet_idx"),
-            layout: Some(&shift_tet_idx_pl),
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("shift_tet_idx.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/shift_tet_idx.wgsl").into()),
-            }),
-            entry_point: Some("shift_tet_idx"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 11. update_tet_idx ---
-        let update_tet_idx_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let update_tet_idx_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("update_tet_idx_bgl"),
-            entries: &[
-                storage_rw_entry(0),  // idx_arr
-                storage_ro_entry(1),  // order_arr
-                uniform_entry(2),     // params
-            ],
-        });
-        let update_tet_idx_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("update_tet_idx_bg"),
-            layout: &update_tet_idx_bgl,
-            entries: &[
-                buf_entry(0, &bufs.vote_arr),
-                buf_entry(1, &bufs.order_arr),
-                buf_entry(2, &update_tet_idx_params),
-            ],
-        });
-        let update_tet_idx_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("update_tet_idx_pl"),
-            bind_group_layouts: &[&update_tet_idx_bgl],
-            push_constant_ranges: &[],
-        });
-        let update_tet_idx_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("update_tet_idx"),
-            layout: Some(&update_tet_idx_pl),
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("update_tet_idx.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/update_tet_idx.wgsl").into()),
-            }),
-            entry_point: Some("update_tet_idx"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
-        // --- 10. make_reverse_map ---
-        let make_reverse_map_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let make_reverse_map_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("make_reverse_map_bgl"),
-            entries: &[
-                storage_ro_entry(0),  // ins_vert_vec
-                storage_ro_entry(1),  // scatter_arr
-                storage_rw_entry(2),  // rev_map_arr
-                uniform_entry(3),     // params
-            ],
-        });
-        let make_reverse_map_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("make_reverse_map_bg"),
-            layout: &make_reverse_map_bgl,
-            entries: &[
-                buf_entry(0, &bufs.uninserted),  // ins_vert_vec
-                buf_entry(1, &bufs.scatter_arr),
-                buf_entry(2, &bufs.rev_map_arr),
-                buf_entry(3, &make_reverse_map_params),
-            ],
-        });
-        let make_reverse_map_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("make_reverse_map_pl"),
-            bind_group_layouts: &[&make_reverse_map_bgl],
-            push_constant_ranges: &[],
-        });
-        let make_reverse_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("make_reverse_map"),
-            layout: Some(&make_reverse_map_pl),
-            module: &device.create_shader_module(wgpu::ShaderModuleDescriptor {
-                label: Some("make_reverse_map.wgsl"),
-                source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/make_reverse_map.wgsl").into()),
-            }),
-            entry_point: Some("make_reverse_map"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1320,6 +1102,55 @@ impl Pipelines {
             layout: Some(&check_delaunay_fast_pl),
             module: &check_delaunay_fast_shader,
             entry_point: Some("check_delaunay_fast"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- check_delaunay_exact (flip voting with DD + SoS) ---
+        let check_delaunay_exact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("check_delaunay_exact.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/check_delaunay_exact.wgsl").into()),
+        });
+        let check_delaunay_exact_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let check_delaunay_exact_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("check_delaunay_exact_bgl"),
+            entries: &[
+                storage_rw_entry(0),  // act_tet_vec (read_write for queue management)
+                storage_ro_entry(1),  // tets
+                storage_rw_entry(2),  // tet_opp
+                storage_ro_entry(3),  // tet_info
+                storage_rw_entry(4),  // tet_vote_arr
+                storage_rw_entry(5),  // vote_arr
+                storage_rw_entry(6),  // counters
+                storage_ro_entry(7),  // points
+                uniform_entry(8),     // params
+            ],
+        });
+        let check_delaunay_exact_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("check_delaunay_exact_bg"),
+            layout: &check_delaunay_exact_bgl,
+            entries: &[
+                buf_entry(0, &bufs.act_tet_vec),
+                buf_entry(1, &bufs.tets),
+                buf_entry(2, &bufs.tet_opp),
+                buf_entry(3, &bufs.tet_info),
+                buf_entry(4, &bufs.tet_vote),  // tet_vote_arr
+                buf_entry(5, &bufs.vote_arr),
+                buf_entry(6, &bufs.counters),
+                buf_entry(7, &bufs.points),
+                buf_entry(8, &check_delaunay_exact_params),
+            ],
+        });
+        let check_delaunay_exact_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("check_delaunay_exact_pl"),
+            bind_group_layouts: &[&check_delaunay_exact_bgl],
+            push_constant_ranges: &[],
+        });
+        let check_delaunay_exact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("check_delaunay_exact"),
+            layout: Some(&check_delaunay_exact_pl),
+            module: &check_delaunay_exact_shader,
+            entry_point: Some("check_delaunay_exact"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1490,6 +1321,9 @@ impl Pipelines {
             check_delaunay_fast_pipeline,
             check_delaunay_fast_bind_group,
             check_delaunay_fast_params,
+            check_delaunay_exact_pipeline,
+            check_delaunay_exact_bind_group,
+            check_delaunay_exact_params,
             allocate_flip23_slot_pipeline,
             allocate_flip23_slot_bind_group,
             allocate_flip23_slot_params,
@@ -1502,6 +1336,21 @@ impl Pipelines {
             update_opp_pipeline,
             update_opp_bind_group,
             update_opp_params,
+            update_flip_trace_pipeline,
+            update_flip_trace_bind_group,
+            update_flip_trace_params,
+            collect_free_slots_pipeline,
+            collect_free_slots_bind_group,
+            collect_free_slots_params,
+            make_compact_map_pipeline,
+            make_compact_map_bind_group,
+            make_compact_map_params,
+            compact_tets_pipeline,
+            compact_tets_bind_group,
+            compact_tets_params,
+            mark_special_tets_pipeline,
+            mark_special_tets_bind_group,
+            mark_special_tets_params,
             mark_rejected_flips_pipeline,
             mark_rejected_flips_bind_group,
             mark_rejected_flips_params,

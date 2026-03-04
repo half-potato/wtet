@@ -32,8 +32,9 @@ impl GpuState {
         // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots
         // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
         let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
-        // Also consider typical Delaunay tet count (~6.5x points)
-        let typical_tets = num_points * 10;
+        // Also consider typical Delaunay tet count (~6.5x points) + overhead for retries
+        // Allocate generously: 30x points to handle worst-case insertions + flips + retries
+        let typical_tets = num_points * 30;
         let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
 
         // Build point buffer: N real points + 4 super-tet vertices
@@ -166,8 +167,8 @@ impl GpuState {
 
         eprintln!("[EXPAND] ✓ Expansion complete, current_tet_num = {}", self.current_tet_num);
 
-        // TODO: Implement reordering/shifting logic
-        // For now, we're just tracking capacity. The actual reordering will be added
-        // when we implement the sorting path (lines 477-556 in CUDA GpuDelaunay.cu)
+        // Note: WGPU uses pre-allocated buffers, so no reordering/shifting needed.
+        // CUDA's sorting path (lines 477-556 in GpuDelaunay.cu) is not required for
+        // the minimal WGPU design. See STUB_DISPATCH_ANALYSIS.md for details.
     }
 }

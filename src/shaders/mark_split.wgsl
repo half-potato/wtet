@@ -3,7 +3,8 @@
 // Before running the split kernel, we need to populate a tet_to_vert mapping
 // so that split threads can detect when their neighbors are also splitting.
 //
-// This shader reads the insert_list and marks each tet with the vertex being inserted.
+// This shader reads the insert_list and marks each tet with the insertion index
+// (not the vertex ID). The split kernel uses this to look up vertex IDs from insert_list.
 
 @group(0) @binding(0) var<storage, read> insert_list: array<vec2<u32>>; // (tet_idx, vert_idx)
 @group(0) @binding(1) var<storage, read_write> tet_to_vert: array<u32>;
@@ -22,7 +23,7 @@ fn mark_split(
 
     let insert = insert_list[idx];
     let tet_idx = insert.x;
-    let vert_idx = insert.y;
 
-    tet_to_vert[tet_idx] = vert_idx;
+    // Store the insertion index (NOT vertex ID) - CUDA stores idx, not vertArr[idx]
+    tet_to_vert[tet_idx] = idx;
 }

@@ -59,6 +59,8 @@ impl GpuState {
     }
 
     /// Dispatch pick winner.
+    /// Uses TET-PARALLEL iteration (user requested CUDA's vertex-parallel logic,
+    /// but that doesn't work well with our pipeline where point_location runs before vote).
     pub fn dispatch_pick_winner(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -108,6 +110,7 @@ impl GpuState {
         _queue: &wgpu::Queue,
         num_uninserted: u32,
     ) {
+        // NOTE: No params buffer needed - shader uses arrayLength(&uninserted) to get count
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("split_points"),
             timestamp_writes: None,
@@ -240,27 +243,102 @@ impl GpuState {
         );
     }
 
-    // ==================== STUB DISPATCH FUNCTIONS (COMMENTED OUT) ====================
-    // TODO: Implement these kernels and uncomment when ready
-    /*
-    pub fn dispatch_collect_free_slots(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_tets: u32) {
-        // ...stub...
+    /// Dispatch collect_free_slots (compactTetras step 1: collect dead tet indices).
+    pub fn dispatch_collect_free_slots(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, new_tet_num: u32) {
+        queue.write_buffer(
+            &self.pipelines.collect_free_slots_params,
+            0,
+            bytemuck::cast_slice(&[new_tet_num, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("collect_free_slots"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.collect_free_slots_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.collect_free_slots_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(new_tet_num, 64), 1, 1);
     }
 
+    /// Dispatch make_compact_map (compactTetras step 2: create old→new mapping).
     pub fn dispatch_make_compact_map(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, new_tet_num: u32, total_tet_num: u32) {
-        // ...stub...
+        queue.write_buffer(
+            &self.pipelines.make_compact_map_params,
+            0,
+            bytemuck::cast_slice(&[new_tet_num, total_tet_num, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("make_compact_map"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.make_compact_map_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.make_compact_map_bind_group), &[]);
+
+        let count = if total_tet_num > new_tet_num {
+            total_tet_num - new_tet_num
+        } else {
+            0
+        };
+        pass.dispatch_workgroups(div_ceil(count, 64), 1, 1);
     }
 
+    /// Dispatch compact_tets (compactTetras step 3: physically compact alive tets).
     pub fn dispatch_compact_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, new_tet_num: u32, total_tet_num: u32) {
-        // ...stub...
+        queue.write_buffer(
+            &self.pipelines.compact_tets_params,
+            0,
+            bytemuck::cast_slice(&[new_tet_num, total_tet_num, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("compact_tets"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.compact_tets_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.compact_tets_bind_group), &[]);
+
+        let count = if total_tet_num > new_tet_num {
+            total_tet_num - new_tet_num
+        } else {
+            0
+        };
+        pass.dispatch_workgroups(div_ceil(count, 64), 1, 1);
     }
 
-    pub fn dispatch_mark_special_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue) {
-        // ...stub...
+    /// Dispatch mark_special_tets (clears OPP_SPECIAL flags between fast/exact flipping).
+    pub fn dispatch_mark_special_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, tet_num: u32) {
+        queue.write_buffer(
+            &self.pipelines.mark_special_tets_params,
+            0,
+            bytemuck::cast_slice(&[tet_num, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("mark_special_tets"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.mark_special_tets_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.mark_special_tets_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(tet_num, 64), 1, 1);
     }
 
+    /// Dispatch update_flip_trace to build flip history chains.
+    /// Port of kerUpdateFlipTrace from KerDivision.cu:742-782
     pub fn dispatch_update_flip_trace(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
-        // ...stub...
+        queue.write_buffer(
+            &self.pipelines.update_flip_trace_params,
+            0,
+            bytemuck::cast_slice(&[org_flip_num, flip_num, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("update_flip_trace"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.update_flip_trace_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.update_flip_trace_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(flip_num, 256), 1, 1);
     }
 
     pub fn dispatch_update_block_vert_free_list(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ins_num: u32, old_ins_num: u32) {
@@ -290,7 +368,6 @@ impl GpuState {
     pub fn dispatch_make_reverse_map(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, ins_vert_num: u32, num: u32) {
         // ...stub...
     }
-    */
 
     /// Dispatch update opp (CRITICAL - flip adjacency updates).
     pub fn dispatch_update_opp(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
@@ -316,6 +393,15 @@ impl GpuState {
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("check_delaunay_fast"), timestamp_writes: None });
         pass.set_pipeline(&self.pipelines.check_delaunay_fast_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.check_delaunay_fast_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+    }
+
+    /// Dispatch check delaunay exact (with DD + SoS predicates).
+    pub fn dispatch_check_delaunay_exact(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, act_tet_num: u32, vote_offset: u32) {
+        queue.write_buffer(&self.pipelines.check_delaunay_exact_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("check_delaunay_exact"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.check_delaunay_exact_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.check_delaunay_exact_bind_group), &[]);
         pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
     }
 

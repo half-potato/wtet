@@ -12,7 +12,7 @@
 @group(0) @binding(1) var<storage, read> tets: array<vec4<u32>>;
 @group(0) @binding(2) var<storage, read_write> tet_opp: array<atomic<u32>>;
 @group(0) @binding(3) var<storage, read> tet_info: array<u32>;
-@group(0) @binding(4) var<storage, read_write> tet_vote_arr: array<i32>;
+@group(0) @binding(4) var<storage, read_write> tet_vote_arr: array<atomic<i32>>;
 @group(0) @binding(5) var<storage, read_write> vote_arr: array<i32>;
 @group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read> points: array<vec4<f32>>;
@@ -86,15 +86,15 @@ fn make_vote_val(bot_ti: u32, flip_info: u32) -> i32 {
 
 fn vote_for_flip23(vote_offset: u32, bot_ti: u32, top_ti: u32) {
     let vote_val = i32(bot_ti);
-    tet_vote_arr[vote_offset + bot_ti] = vote_val;
-    tet_vote_arr[vote_offset + top_ti] = vote_val;
+    atomicMin(&tet_vote_arr[vote_offset + bot_ti], vote_val);
+    atomicMin(&tet_vote_arr[vote_offset + top_ti], vote_val);
 }
 
 fn vote_for_flip32(vote_offset: u32, bot_ti: u32, top_ti: u32, bot_opp_ti: u32) {
     let vote_val = i32(bot_ti);
-    tet_vote_arr[vote_offset + bot_ti] = vote_val;
-    tet_vote_arr[vote_offset + top_ti] = vote_val;
-    tet_vote_arr[vote_offset + bot_opp_ti] = vote_val;
+    atomicMin(&tet_vote_arr[vote_offset + bot_ti], vote_val);
+    atomicMin(&tet_vote_arr[vote_offset + top_ti], vote_val);
+    atomicMin(&tet_vote_arr[vote_offset + bot_opp_ti], vote_val);
 }
 
 fn orient3d_fast(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> i32 {
