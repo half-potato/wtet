@@ -30,8 +30,9 @@ fn test_minimal_split_execution() {
             required_features: wgpu::Features::empty(),
             required_limits: limits,
             memory_hints: Default::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            trace: wgpu::Trace::Off,
         },
-        None,
     ))
     .expect("Failed to create device");
 
@@ -210,7 +211,7 @@ fn test_minimal_split_execution() {
     let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
         label: Some("split_pl"),
         bind_group_layouts: &[&bgl],
-        push_constant_ranges: &[],
+        immediate_size: 0,
     });
 
     let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -238,7 +239,7 @@ fn test_minimal_split_execution() {
 
     eprintln!("[TEST] Dispatching split...");
     queue.submit(Some(encoder.finish()));
-    device.poll(wgpu::Maintain::Wait);
+    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     eprintln!("[TEST] Split dispatched and completed");
 
     // 8. Read back tet_info to verify split ran
@@ -258,7 +259,7 @@ fn test_minimal_split_execution() {
     buffer_slice.map_async(wgpu::MapMode::Read, move |result| {
         let _ = tx.send(result);
     });
-    device.poll(wgpu::Maintain::Wait);
+    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     pollster::block_on(rx).unwrap().unwrap();
 
     let data = buffer_slice.get_mapped_range();

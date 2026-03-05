@@ -29,6 +29,10 @@ pub struct GpuBuffers {
     pub counters: wgpu::Buffer,
     /// Uninserted point indices: u32 × N
     pub uninserted: wgpu::Buffer,
+    /// Temporary buffer for vertex compaction: u32 × N
+    pub uninserted_temp: wgpu::Buffer,
+    /// Temporary buffer for vert_tet compaction: u32 × N
+    pub vert_tet_temp: wgpu::Buffer,
     /// Insert list: vec2<u32> × N (tet_idx, vert_idx pairs)
     pub insert_list: wgpu::Buffer,
     /// Tet to vertex mapping: u32 × max_tets (INVALID if not splitting)
@@ -233,6 +237,20 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        let uninserted_temp = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("uninserted_temp"),
+            size: (num_points as u64) * 4,
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let vert_tet_temp = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("vert_tet_temp"),
+            size: (num_points as u64) * 4,
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
         let insert_list = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("insert_list"),
             size: (num_points as u64) * 8, // vec2<u32> = 8 bytes
@@ -428,6 +446,8 @@ impl GpuBuffers {
             vert_free_arr,
             counters,
             uninserted,
+            uninserted_temp,
+            vert_tet_temp,
             insert_list,
             tet_to_vert,
             tet_split_map,
@@ -486,7 +506,7 @@ impl GpuBuffers {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();
@@ -557,7 +577,7 @@ impl GpuBuffers {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();
@@ -633,7 +653,7 @@ impl GpuBuffers {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();
@@ -671,7 +691,7 @@ impl GpuBuffers {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();

@@ -5,7 +5,7 @@ edition = "2021"
 description = "GPU-accelerated 3D Delaunay triangulation using wgpu compute shaders"
 
 [dependencies]
-wgpu = "24"
+wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.29"
 pollster = "0.4"

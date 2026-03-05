@@ -23,7 +23,7 @@ pub async fn run(
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_init(&mut encoder);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Debug: Check if tet 0 is alive after init
         let tet_info_debug: Vec<u32> = state
@@ -90,13 +90,13 @@ pub async fn run(
         state.dispatch_reset_votes(&mut encoder, queue, num_uninserted);
 
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // 2. Vote (each vertex votes for its CURRENT tet - no locate first!)
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_vote(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Debug: Read vert_sphere and tet_vote after voting
         if iteration == 2 {
@@ -119,13 +119,13 @@ pub async fn run(
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_pick_winner(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // 4. Build insert list (second pass: filter exact winners to prevent duplicates)
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_build_insert_list(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Read back how many points were picked for insertion
         let counters = state.buffers.read_counters(device, queue).await;
@@ -176,7 +176,7 @@ pub async fn run(
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split_points(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Debug: Check how many vert_tet updates split_points made
         if iteration <= 2 {
@@ -193,7 +193,7 @@ pub async fn run(
         println!("[DEBUG] Submitting split command buffer");
         queue.submit(Some(command_buffer));
         println!("[DEBUG] Waiting for split to complete");
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         println!("[DEBUG] Split complete");
 
         // Debug: Check tet_info and counters after split
@@ -212,7 +212,7 @@ pub async fn run(
         // let mut encoder = device.create_command_encoder(&Default::default());
         // state.dispatch_split_fixup(&mut encoder, queue, num_inserted);
         // queue.submit(Some(encoder.finish()));
-        // device.poll(wgpu::Maintain::Wait);
+        // device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Note: We don't update vert_tet here because it will be done at the start of the next iteration
 
@@ -260,19 +260,19 @@ pub async fn run(
                 // STEP 1: VOTE - Check Delaunay violations and vote for flips
                 state.dispatch_check_delaunay_fast(&mut encoder, queue, flip_queue_size, vote_offset);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // STEP 2: VALIDATE - Mark rejected flips
                 let mut encoder = device.create_command_encoder(&Default::default());
                 state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // STEP 3: COMPACT - Remove rejected flips
                 let mut encoder = device.create_command_encoder(&Default::default());
                 state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // Read compacted flip count
                 let flip_count = state.buffers.read_compact_count(device, queue).await;
@@ -293,20 +293,20 @@ pub async fn run(
                 let inf_idx = state.max_tets; // Infinity vertex at end
                 state.dispatch_allocate_flip23_slot(&mut encoder, queue, flip_count, inf_idx, state.max_tets);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // STEP 5: FLIP - Perform the flips
                 let mut encoder = device.create_command_encoder(&Default::default());
                 let inf_idx = state.num_points;  // Infinity point index
                 state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // STEP 6: UPDATE - Fix adjacency
                 let mut encoder = device.create_command_encoder(&Default::default());
                 state.dispatch_update_opp(&mut encoder, queue, 0, flip_count);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                 // Track this batch boundary for relocateAll
                 org_flip_num.push(total_flips);
@@ -325,7 +325,7 @@ pub async fn run(
             let mut encoder = device.create_command_encoder(&Default::default());
             state.dispatch_mark_special_tets(&mut encoder, queue, state.max_tets);
             queue.submit(Some(encoder.finish()));
-            device.poll(wgpu::Maintain::Wait);
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
             // Count how many special tets need exact processing
             let special_tet_count = state.buffers.read_compact_count(device, queue).await;
@@ -351,19 +351,19 @@ pub async fn run(
                     // STEP 1: VOTE - Check Delaunay violations with exact predicates
                     state.dispatch_check_delaunay_exact(&mut encoder, queue, flip_queue_size, vote_offset);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // STEP 2: VALIDATE - Mark rejected flips
                     let mut encoder = device.create_command_encoder(&Default::default());
                     state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // STEP 3: COMPACT - Remove rejected flips
                     let mut encoder = device.create_command_encoder(&Default::default());
                     state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // Read compacted flip count
                     let flip_count = state.buffers.read_compact_count(device, queue).await;
@@ -384,20 +384,20 @@ pub async fn run(
                     let inf_idx = state.max_tets;
                     state.dispatch_allocate_flip23_slot(&mut encoder, queue, flip_count, inf_idx, state.max_tets);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // STEP 5: FLIP - Perform the flips
                     let mut encoder = device.create_command_encoder(&Default::default());
                     let inf_idx = state.num_points;  // Infinity point index
                     state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // STEP 6: UPDATE - Fix adjacency
                     let mut encoder = device.create_command_encoder(&Default::default());
                     state.dispatch_update_opp(&mut encoder, queue, 0, flip_count);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     // Track this batch boundary for relocateAll
                     org_flip_num.push(total_flips);
@@ -427,7 +427,7 @@ pub async fn run(
                     let mut encoder = device.create_command_encoder(&Default::default());
                     state.dispatch_update_flip_trace(&mut encoder, queue, prev_flip_num, flip_num);
                     queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::Maintain::Wait);
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
                     next_flip_num = prev_flip_num;
                 }
@@ -436,52 +436,52 @@ pub async fn run(
                 let mut encoder = device.create_command_encoder(&Default::default());
                 state.dispatch_relocate_points_fast(&mut encoder, queue, num_uninserted);
                 queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::Maintain::Wait);
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             }
         }
 
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
-        // Read back the insert_list to know which vertices were inserted.
-        let inserted_verts = read_inserted_verts(device, queue, state, num_inserted as usize).await;
-        let inserted_positions: std::collections::HashSet<usize> = inserted_verts
-            .iter()
-            .filter_map(|v| state.uninserted.iter().position(|u| u == v))
-            .collect();
+        // GPU-accelerated compaction (FLAW #2 fix)
+        {
+            let mut encoder = device.create_command_encoder(&Default::default());
 
-        // Read back current vert_tet
-        let old_vert_tet: Vec<u32> = state
-            .buffers
-            .read_buffer_as(device, queue, &state.buffers.vert_tet, num_uninserted as usize)
-            .await;
+            // Dispatch GPU compaction (2-pass: count, then scatter)
+            state.dispatch_compact_vertex_arrays(&mut encoder, queue, num_uninserted, num_inserted);
 
-        // Remove inserted vertices from uninserted
-        state
-            .uninserted
-            .retain(|v| !inserted_verts.contains(v));
-
-        // Compact vert_tet to match new uninserted array
-        // Old position -> new position (or None if inserted)
-        let mut new_vert_tet = Vec::with_capacity(state.uninserted.len());
-        for (old_pos, &tet_idx) in old_vert_tet.iter().enumerate() {
-            if !inserted_positions.contains(&old_pos) {
-                new_vert_tet.push(tet_idx);
-            }
-        }
-
-        // Write back compacted vert_tet
-        if !new_vert_tet.is_empty() {
-            queue.write_buffer(
+            // Copy compacted results from temp buffers back to main buffers
+            encoder.copy_buffer_to_buffer(
+                &state.buffers.uninserted_temp,
+                0,
+                &state.buffers.uninserted,
+                0,
+                (num_uninserted as u64) * 4,
+            );
+            encoder.copy_buffer_to_buffer(
+                &state.buffers.vert_tet_temp,
+                0,
                 &state.buffers.vert_tet,
                 0,
-                bytemuck::cast_slice(&new_vert_tet),
+                (num_uninserted as u64) * 4,
             );
+
+            queue.submit(Some(encoder.finish()));
+            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         }
 
+        // Read back compacted count and arrays
+        let new_count = state.buffers.read_compact_count(device, queue).await as usize;
+        let new_uninserted: Vec<u32> = state
+            .buffers
+            .read_buffer_as(device, queue, &state.buffers.uninserted, new_count)
+            .await;
+
+        // Update CPU state
+        state.uninserted = new_uninserted;
+
         println!(
-            "[DEBUG] After iteration {}: {} points remaining, vert_tet compacted: {:?}",
+            "[DEBUG] After iteration {}: {} points remaining (GPU compacted)",
             iteration,
-            state.uninserted.len(),
-            new_vert_tet
+            state.uninserted.len()
         );
     }
 
@@ -490,7 +490,7 @@ pub async fn run(
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_gather(&mut encoder);
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     }
 
     if !state.uninserted.is_empty() {

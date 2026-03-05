@@ -51,6 +51,15 @@ const TET_VI_AS_SEEN_FROM: array<vec3<u32>, 4> = array<vec3<u32>, 4>(
     vec3<u32>(0u, 1u, 2u),
 );
 
+// CRITICAL FIX: Helper function to avoid variable array indexing (causes SIGSEGV)
+// Cannot use TET_VI_AS_SEEN_FROM[variable] - must use explicit branches
+fn get_tet_vi_as_seen_from(vi: u32) -> vec3<u32> {
+    if vi == 0u { return vec3<u32>(1u, 3u, 2u); }
+    else if vi == 1u { return vec3<u32>(0u, 2u, 3u); }
+    else if vi == 2u { return vec3<u32>(0u, 3u, 1u); }
+    else { return vec3<u32>(0u, 1u, 2u); }
+}
+
 // TetNextViAsSeenFrom[4][4] - navigation around tet (CommonTypes.h:132-137)
 // Returns -1 for self-index, otherwise index position
 // Note: WGSL doesn't support -1 in u32, so we use a function instead

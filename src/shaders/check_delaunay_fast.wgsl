@@ -33,6 +33,15 @@ const TET_VI_AS_SEEN_FROM: array<vec3<u32>, 4> = array<vec3<u32>, 4>(
     vec3<u32>(0u, 1u, 2u), // seen from vertex 3
 );
 
+// CRITICAL FIX: Helper function to avoid variable array indexing (causes SIGSEGV)
+// Cannot use TET_VI_AS_SEEN_FROM[variable] - must use explicit branches
+fn get_tet_vi_as_seen_from(vi: u32) -> vec3<u32> {
+    if vi == 0u { return vec3<u32>(1u, 3u, 2u); }
+    else if vi == 1u { return vec3<u32>(0u, 2u, 3u); }
+    else if vi == 2u { return vec3<u32>(0u, 3u, 1u); }
+    else { return vec3<u32>(0u, 1u, 2u); }
+}
+
 fn decode_opp_tet(opp: u32) -> u32 {
     return opp >> 5u;
 }
@@ -318,7 +327,8 @@ fn check_delaunay_fast(
         for (var i = 0u; i < 3u; i++) {
             // Avoid dynamic vector and array indexing
             let ord_vi_elem = select(bot_ord_vi.x, select(bot_ord_vi.y, bot_ord_vi.z, i == 2u), i >= 1u);
-            let fv = TET_VI_AS_SEEN_FROM[ord_vi_elem];
+            // CRITICAL FIX: Cannot use TET_VI_AS_SEEN_FROM[variable] - causes SIGSEGV
+            let fv = get_tet_vi_as_seen_from(ord_vi_elem);
 
             // Extract bot_p elements using select to avoid dynamic array indexing
             let p0 = select(select(bot_p[0], bot_p[1], fv.x == 1u), select(bot_p[2], bot_p[3], fv.x == 3u), fv.x >= 2u);

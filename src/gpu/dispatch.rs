@@ -438,6 +438,45 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(input_size, 256), 1, 1);
     }
 
+    /// Dispatch compact vertex arrays (two-pass compaction).
+    /// Compacts both uninserted and vert_tet arrays by removing inserted vertices.
+    pub fn dispatch_compact_vertex_arrays(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+        num_inserted: u32,
+    ) {
+        // Pass 1: Count vertices NOT in insert_list
+        queue.write_buffer(
+            &self.pipelines.compact_vertex_arrays_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, num_inserted, 0u32, 0u32]),
+        );
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("compact_vertex_arrays_pass1"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        drop(pass);
+
+        // Pass 2: Compact non-inserted vertices to temp buffers
+        queue.write_buffer(
+            &self.pipelines.compact_vertex_arrays_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, num_inserted, 1u32, 0u32]),
+        );
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("compact_vertex_arrays_pass2"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+    }
+
     /// Dispatch relocate points fast.
     pub fn dispatch_relocate_points_fast(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_uninserted: u32) {
         queue.write_buffer(&self.pipelines.relocate_points_fast_params, 0, bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]));
@@ -512,7 +551,7 @@ impl GpuState {
         self.dispatch_compact_tets(&mut encoder, queue, new_tet_num, total_tet_num);
 
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         log::info!("[COMPACT] ✓ Compaction complete, {} alive tets", new_tet_num);
 

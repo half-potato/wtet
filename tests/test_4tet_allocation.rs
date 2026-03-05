@@ -25,8 +25,9 @@ fn test_minimal_4tet_allocation() {
                     required_features: wgpu::Features::empty(),
                     required_limits: wgpu::Limits::default(),
                     memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .unwrap();
@@ -189,7 +190,7 @@ fn test_allocation() {
         let pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pipeline_layout"),
             bind_group_layouts: &[&bind_group_layout],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -210,7 +211,7 @@ fn test_allocation() {
             pass.dispatch_workgroups(1, 1, 1);
         }
         queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Read back results
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -229,7 +230,7 @@ fn test_allocation() {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();
@@ -261,7 +262,7 @@ fn test_allocation() {
         slice.map_async(wgpu::MapMode::Read, move |result| {
             let _ = tx.send(result);
         });
-        device.poll(wgpu::Maintain::Wait);
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         rx.await.unwrap().unwrap();
 
         let data = slice.get_mapped_range();

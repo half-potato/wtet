@@ -51,6 +51,36 @@ const SPLIT_NEXT: array<array<u32, 2>, 11> = array(
     array(4u, 0u),    // 10
 );
 
+// CRITICAL FIX: Helper functions to avoid variable array indexing (causes SIGSEGV)
+// Cannot use SPLIT_FACES[variable] or SPLIT_NEXT[variable] - must use explicit branches
+fn get_split_face(face: u32) -> array<u32, 3> {
+    if face == 0u { return array(0u, 1u, 4u); }
+    else if face == 1u { return array(0u, 3u, 4u); }
+    else if face == 2u { return array(0u, 2u, 4u); }
+    else if face == 3u { return array(2u, 3u, 4u); }
+    else if face == 4u { return array(1u, 3u, 4u); }
+    else if face == 5u { return array(1u, 2u, 4u); }
+    else if face == 6u { return array(2u, 3u, 4u); }
+    else if face == 7u { return array(1u, 3u, 2u); }
+    else if face == 8u { return array(0u, 2u, 3u); }
+    else if face == 9u { return array(0u, 3u, 1u); }
+    else { return array(0u, 1u, 2u); } // face == 10
+}
+
+fn get_split_next(face: u32, orient_positive: bool) -> u32 {
+    if face == 0u { return select(2u, 1u, orient_positive); }
+    else if face == 1u { return select(4u, 3u, orient_positive); }
+    else if face == 2u { return select(6u, 5u, orient_positive); }
+    else if face == 3u { return select(8u, 7u, orient_positive); }
+    else if face == 4u { return select(7u, 9u, orient_positive); }
+    else if face == 5u { return select(10u, 7u, orient_positive); }
+    else if face == 6u { return select(8u, 7u, orient_positive); }
+    else if face == 7u { return select(0u, 1u, orient_positive); }
+    else if face == 8u { return select(0u, 2u, orient_positive); }
+    else if face == 9u { return select(0u, 3u, orient_positive); }
+    else { return select(0u, 4u, orient_positive); } // face == 10
+}
+
 // --- Double-Double Arithmetic for Exact Predicates ---
 
 struct DD {
@@ -271,7 +301,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     for (var i = 0u; i < 3u; i++) {
         // Get face vertices for current face
-        let fv = SPLIT_FACES[face];
+        // CRITICAL FIX: Cannot use SPLIT_FACES[variable] - causes SIGSEGV
+        let fv = get_split_face(face);
 
         // Orient3d test: is vertex above or below this face?
         // Use exact predicates with SoS for degenerate cases
@@ -287,11 +318,8 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
 
         // Navigate to next face based on orientation
-        if (orient > 0) {
-            face = SPLIT_NEXT[face][0]; // Positive orientation
-        } else {
-            face = SPLIT_NEXT[face][1]; // Negative or zero orientation
-        }
+        // CRITICAL FIX: Cannot use SPLIT_NEXT[variable] - causes SIGSEGV
+        face = get_split_next(face, orient > 0);
     }
 
     // After 3 iterations, face should be in range 7-10

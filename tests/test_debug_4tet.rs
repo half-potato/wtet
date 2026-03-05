@@ -25,8 +25,9 @@ fn test_debug_4tet() {
                     required_features: wgpu::Features::empty(),
                     required_limits: required_limits(),
                     memory_hints: wgpu::MemoryHints::default(),
+                    experimental_features: wgpu::ExperimentalFeatures::disabled(),
+                    trace: wgpu::Trace::Off,
                 },
-                None,
             )
             .await
             .unwrap()

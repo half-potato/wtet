@@ -168,7 +168,7 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
         power_preference: wgpu::PowerPreference::HighPerformance,
         force_fallback_adapter: false,
         compatible_surface: None,
-    }))?;
+    })).ok()?;
 
     let mut limits = wgpu::Limits::default();
     limits.max_storage_buffers_per_shader_stage = 10;
@@ -180,8 +180,9 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
             required_features: wgpu::Features::empty(),
             required_limits: limits,
             memory_hints: Default::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            trace: wgpu::Trace::Off,
         },
-        None,
     ))
     .ok()?;
 
@@ -262,6 +263,16 @@ fn test_gpu_prefix_sum_shader_compiles() {
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("prefix_sum.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/prefix_sum.wgsl").into()),
+        });
+    });
+}
+
+#[test]
+fn test_gpu_compact_vertex_arrays_shader_compiles() {
+    with_gpu(|device, _queue| {
+        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("compact_vertex_arrays.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/compact_vertex_arrays.wgsl").into()),
         });
     });
 }
@@ -2145,8 +2156,9 @@ fn test_update_opp_shader_compiles() {
             required_features: wgpu::Features::empty(),
             required_limits: wgpu::Limits::default(),
             memory_hints: Default::default(),
+            experimental_features: wgpu::ExperimentalFeatures::disabled(),
+            trace: wgpu::Trace::Off,
         },
-        None,
     )).unwrap();
 
     eprintln!("Creating update_opp shader module...");

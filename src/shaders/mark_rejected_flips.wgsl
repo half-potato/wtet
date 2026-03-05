@@ -110,7 +110,9 @@ fn mark_rejected_flips(@builtin(global_invocation_id) gid: vec3<u32>,
                         // For 3-2 flip, also check corner/side tet
                         let ord_vi = TET_VI_AS_SEEN_FROM[bot_vi];
                         let cor_ord_vi = get_flip_bot_cor_ord_vi(flip_info);
-                        let bot_cor_vi = ord_vi[cor_ord_vi];
+                        // CRITICAL FIX: Cannot index vec3 with variable - causes SIGSEGV
+                        // Use select() instead: if cor_ord_vi==0->x, ==1->y, ==2->z
+                        let bot_cor_vi = select(select(ord_vi.x, ord_vi.y, cor_ord_vi == 1u), ord_vi.z, cor_ord_vi == 2u);
 
                         // Side tet
                         let side_opp = atomicLoad(&tet_opp[u32(tet_idx) * 4u + bot_cor_vi]);

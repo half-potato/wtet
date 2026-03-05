@@ -80,6 +80,11 @@ pub struct Pipelines {
     pub compact_if_negative_bind_group: wgpu::BindGroup,
     pub compact_if_negative_params: wgpu::Buffer,
 
+    // Pipeline: compact vertex arrays
+    pub compact_vertex_arrays_pipeline: wgpu::ComputePipeline,
+    pub compact_vertex_arrays_bind_group: wgpu::BindGroup,
+    pub compact_vertex_arrays_params: wgpu::Buffer,
+
     // Pipeline: relocate points fast
     pub relocate_points_fast_pipeline: wgpu::ComputePipeline,
     pub relocate_points_fast_bind_group: wgpu::BindGroup,
@@ -172,7 +177,7 @@ impl Pipelines {
         let init_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("init_pl"),
             bind_group_layouts: &[&init_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let init_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -226,7 +231,7 @@ impl Pipelines {
         let vote_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vote_pl"),
             bind_group_layouts: &[&vote_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let vote_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -272,7 +277,7 @@ impl Pipelines {
         let pick_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("pick_pl"),
             bind_group_layouts: &[&pick_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let pick_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -318,7 +323,7 @@ impl Pipelines {
         let build_insert_list_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("build_insert_list_pl"),
             bind_group_layouts: &[&build_insert_list_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let build_insert_list_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -364,7 +369,7 @@ impl Pipelines {
         let update_vert_free_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_vert_free_pl"),
             bind_group_layouts: &[&update_vert_free_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let update_vert_free_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -422,7 +427,7 @@ impl Pipelines {
         let split_points_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("split_points_pl"),
             bind_group_layouts: &[&split_points_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let split_points_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -484,7 +489,7 @@ impl Pipelines {
         let split_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("split_pl"),
             bind_group_layouts: &[&split_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -530,7 +535,7 @@ impl Pipelines {
         let update_uninserted_vert_tet_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_uninserted_vert_tet_pl"),
             bind_group_layouts: &[&update_uninserted_vert_tet_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let update_uninserted_vert_tet_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -609,7 +614,7 @@ impl Pipelines {
         let flip_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("flip_pl"),
             bind_group_layouts: &[&flip_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let flip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -655,7 +660,7 @@ impl Pipelines {
         let reset_votes_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("reset_votes_pl"),
             bind_group_layouts: &[&reset_votes_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
         let reset_votes_pipeline =
@@ -709,7 +714,7 @@ impl Pipelines {
         let gather_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gather_pl"),
             bind_group_layouts: &[&gather_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
 
 
@@ -768,7 +773,7 @@ impl Pipelines {
         let collect_free_slots_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("collect_free_slots_pl"),
             bind_group_layouts: &[&collect_free_slots_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let collect_free_slots_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("collect_free_slots"),
@@ -802,7 +807,7 @@ impl Pipelines {
         let make_compact_map_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("make_compact_map_pl"),
             bind_group_layouts: &[&make_compact_map_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let make_compact_map_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("make_compact_map"),
@@ -837,7 +842,7 @@ impl Pipelines {
         let compact_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("compact_tets_pl"),
             bind_group_layouts: &[&compact_tets_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let compact_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("compact_tets"),
@@ -878,7 +883,7 @@ impl Pipelines {
         let mark_special_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mark_special_tets_pl"),
             bind_group_layouts: &[&mark_special_tets_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let mark_special_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mark_special_tets"),
@@ -911,7 +916,7 @@ impl Pipelines {
         let update_flip_trace_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_flip_trace_pl"),
             bind_group_layouts: &[&update_flip_trace_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let update_flip_trace_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_flip_trace"),
@@ -952,7 +957,7 @@ impl Pipelines {
         let update_opp_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_opp_pl"),
             bind_group_layouts: &[&update_opp_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let update_opp_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("update_opp"),
@@ -993,7 +998,7 @@ impl Pipelines {
         let mark_rejected_flips_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mark_rejected_flips_pl"),
             bind_group_layouts: &[&mark_rejected_flips_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let mark_rejected_flips_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("mark_rejected_flips"),
@@ -1042,7 +1047,7 @@ impl Pipelines {
         let check_delaunay_fast_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("check_delaunay_fast_pl"),
             bind_group_layouts: &[&check_delaunay_fast_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let check_delaunay_fast_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("check_delaunay_fast"),
@@ -1091,7 +1096,7 @@ impl Pipelines {
         let check_delaunay_exact_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("check_delaunay_exact_pl"),
             bind_group_layouts: &[&check_delaunay_exact_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let check_delaunay_exact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("check_delaunay_exact"),
@@ -1134,7 +1139,7 @@ impl Pipelines {
         let allocate_flip23_slot_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("allocate_flip23_slot_pl"),
             bind_group_layouts: &[&allocate_flip23_slot_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let allocate_flip23_slot_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("allocate_flip23_slot"),
@@ -1173,13 +1178,58 @@ impl Pipelines {
         let compact_if_negative_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("compact_if_negative_pl"),
             bind_group_layouts: &[&compact_if_negative_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let compact_if_negative_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("compact_if_negative"),
             layout: Some(&compact_if_negative_pl),
             module: &compact_if_negative_shader,
             entry_point: Some("compact_if_negative"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- compact_vertex_arrays ---
+        let compact_vertex_arrays_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("compact_vertex_arrays.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_vertex_arrays.wgsl").into()),
+        });
+        let compact_vertex_arrays_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let compact_vertex_arrays_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_vertex_arrays_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // uninserted_in
+                storage_ro_entry(1),  // vert_tet_in
+                storage_ro_entry(2),  // insert_list
+                storage_rw_entry(3),  // uninserted_out
+                storage_rw_entry(4),  // vert_tet_out
+                storage_rw_entry(5),  // counter
+                uniform_entry(6),     // params
+            ],
+        });
+        let compact_vertex_arrays_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_vertex_arrays_bg"),
+            layout: &compact_vertex_arrays_bgl,
+            entries: &[
+                buf_entry(0, &bufs.uninserted),
+                buf_entry(1, &bufs.vert_tet),
+                buf_entry(2, &bufs.insert_list),
+                buf_entry(3, &bufs.uninserted_temp),
+                buf_entry(4, &bufs.vert_tet_temp),
+                buf_entry(5, &bufs.counters),
+                buf_entry(6, &compact_vertex_arrays_params),
+            ],
+        });
+        let compact_vertex_arrays_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_vertex_arrays_pl"),
+            bind_group_layouts: &[&compact_vertex_arrays_bgl],
+            immediate_size: 0,
+        });
+        let compact_vertex_arrays_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_vertex_arrays"),
+            layout: Some(&compact_vertex_arrays_pl),
+            module: &compact_vertex_arrays_shader,
+            entry_point: Some("compact_vertex_arrays"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1216,7 +1266,7 @@ impl Pipelines {
         let relocate_points_fast_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("relocate_points_fast_pl"),
             bind_group_layouts: &[&relocate_points_fast_bgl],
-            push_constant_ranges: &[],
+            immediate_size: 0,
         });
         let relocate_points_fast_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
             label: Some("relocate_points_fast"),
@@ -1274,6 +1324,9 @@ impl Pipelines {
             compact_if_negative_pipeline,
             compact_if_negative_bind_group,
             compact_if_negative_params,
+            compact_vertex_arrays_pipeline,
+            compact_vertex_arrays_bind_group,
+            compact_vertex_arrays_params,
             relocate_points_fast_pipeline,
             relocate_points_fast_bind_group,
             relocate_points_fast_params,
