@@ -14,6 +14,7 @@
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
+const OPP_SPHERE_FAIL: u32 = 16u;  // Bit 4 of TetOpp encoding
 const COUNTER_FAILED: u32 = 3u;
 
 fn insphere_simple(
@@ -98,6 +99,12 @@ fn gather_failed(
             continue;
         }
 
+        // Check if this face has OPP_SPHERE_FAIL flag set (CUDA: KerDivision.cu:708)
+        // This flag is set by check_delaunay_exact when insphere test fails
+        if (opp_packed & OPP_SPHERE_FAIL) == 0u {
+            continue;  // No sphere failure on this face
+        }
+
         let opp_tet = tets[opp_tet_idx];
         let opposite_vert = tet_vertex(opp_tet, opp_face);
 
@@ -117,25 +124,8 @@ fn gather_failed(
             continue;
         }
 
-        let v0 = points[tet.x].xyz;
-        let v1 = points[tet.y].xyz;
-        let v2 = points[tet.z].xyz;
-        let v3 = points[tet.w].xyz;
-        let pe = points[opposite_vert].xyz;
-
-        let o = orient3d_simple(v0, v1, v2, v3);
-
-        var is_inside: f32;
-        if o > 0.0 {
-            is_inside = insphere_simple(v0, v1, v2, v3, pe);
-        } else {
-            is_inside = -insphere_simple(v0, v2, v1, v3, pe);
-        }
-
-        if is_inside > 0.0 {
-            // Delaunay violation! Mark the opposite vertex as failed.
-            let slot = atomicAdd(&counters[COUNTER_FAILED], 1u);
-            failed_verts[slot] = opposite_vert;
-        }
+        // Delaunay violation detected by flag! Mark the opposite vertex as failed.
+        let slot = atomicAdd(&counters[COUNTER_FAILED], 1u);
+        failed_verts[slot] = opposite_vert;
     }
 }

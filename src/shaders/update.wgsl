@@ -67,7 +67,6 @@ fn relocate_points(
         return;
     }
 
-    // Tet was destroyed by a flip — need to re-locate
-    // Set to INVALID so point_location will start from tet 0
+    // Tet was destroyed by a flip — set INVALID, will be updated by split_points
     vert_tet[vert_idx] = INVALID;
 }

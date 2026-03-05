@@ -145,21 +145,23 @@ impl GpuBuffers {
         });
         eprintln!("    ✓ vert_tet: {} bytes (num_points+4)", (num_points + 4) * 4);
 
-        let tet_vote = device.create_buffer(&wgpu::BufferDescriptor {
+        // Initialize vote buffers defensively (NO_VOTE = i32::MIN = 0x80000000)
+        let no_vote: i32 = i32::MIN;
+        let tet_vote_data = vec![no_vote; max_tets as usize];
+        let tet_vote = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("tet_vote"),
-            size: (max_tets as u64) * 4,
+            contents: bytemuck::cast_slice(&tet_vote_data),
             usage: storage_rw,
-            mapped_at_creation: false,
         });
-        eprintln!("    ✓ tet_vote: {} bytes", max_tets * 4);
+        eprintln!("    ✓ tet_vote: {} bytes (initialized)", max_tets * 4);
 
-        let vert_sphere = device.create_buffer(&wgpu::BufferDescriptor {
+        let vert_sphere_data = vec![no_vote; num_points as usize];
+        let vert_sphere = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vert_sphere"),
-            size: (num_points as u64) * 4,
+            contents: bytemuck::cast_slice(&vert_sphere_data),
             usage: storage_rw,
-            mapped_at_creation: false,
         });
-        eprintln!("    ✓ vert_sphere: {} bytes", num_points * 4);
+        eprintln!("    ✓ vert_sphere: {} bytes (initialized)", num_points * 4);
 
         // Free stack: initially filled with indices [1..max_tets) since tet 0 is the super-tet
         let free_data: Vec<u32> = (1..max_tets).collect();

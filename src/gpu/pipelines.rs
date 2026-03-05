@@ -7,11 +7,6 @@ pub struct Pipelines {
     pub init_bind_group: wgpu::BindGroup,
     pub init_params: wgpu::Buffer,
 
-    // Pipeline: point location
-    pub locate_pipeline: wgpu::ComputePipeline,
-    pub locate_bind_group: wgpu::BindGroup,
-    pub locate_params: wgpu::Buffer,
-
     // Pipeline: vote for point
     pub vote_pipeline: wgpu::ComputePipeline,
     pub vote_bind_group: wgpu::BindGroup,
@@ -32,10 +27,7 @@ pub struct Pipelines {
     pub update_vert_free_bind_group: wgpu::BindGroup,
     pub update_vert_free_params: wgpu::Buffer,
 
-    // Pipeline: mark split (marks tets being split for concurrent detection)
-    pub mark_split_pipeline: wgpu::ComputePipeline,
-    pub mark_split_bind_group: wgpu::BindGroup,
-    pub mark_split_params: wgpu::Buffer,
+    // Pipeline: mark split - REMOVED (obsolete, pick_winner_point populates tet_to_vert)
 
     // Pipeline: split points (updates vert_tet for uninserted vertices whose tets are splitting)
     pub split_points_pipeline: wgpu::ComputePipeline,
@@ -192,58 +184,6 @@ impl Pipelines {
             cache: None,
         });
 
-        // --- Point location pipeline ---
-        let locate_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point_location.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/point_location.wgsl").into(),
-            ),
-        });
-
-        let locate_params = GpuBuffers::create_params_buffer(device, [num_points, 512, 0, 0]);
-
-        let locate_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("locate_bgl"),
-            entries: &[
-                storage_ro_entry(0),  // points
-                storage_ro_entry(1),  // tets
-                storage_ro_entry(2),  // tet_opp
-                storage_ro_entry(3),  // tet_info
-                storage_rw_entry(4),  // vert_tet
-                storage_ro_entry(5),  // uninserted
-                uniform_entry(6),     // params
-            ],
-        });
-
-        let locate_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("locate_bg"),
-            layout: &locate_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.uninserted),
-                buf_entry(6, &locate_params),
-            ],
-        });
-
-        let locate_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("locate_pl"),
-            bind_group_layouts: &[&locate_bgl],
-            push_constant_ranges: &[],
-        });
-
-        let locate_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("locate"),
-            layout: Some(&locate_pl),
-            module: &locate_shader,
-            entry_point: Some("locate_points"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
-
         // --- Vote pipeline ---
         let vote_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("vote.wgsl"),
@@ -310,7 +250,8 @@ impl Pipelines {
                 storage_ro_entry(2),  // vert_tet
                 storage_rw_entry(3),  // tet_to_vert (atomicMin winner selection)
                 storage_ro_entry(4),  // uninserted (map position to vertex ID)
-                uniform_entry(5),     // params
+                storage_ro_entry(5),  // tet_info (alive state check)
+                uniform_entry(6),     // params
             ],
         });
 
@@ -323,7 +264,8 @@ impl Pipelines {
                 buf_entry(2, &bufs.vert_tet),
                 buf_entry(3, &bufs.tet_to_vert),
                 buf_entry(4, &bufs.uninserted),
-                buf_entry(5, &pick_params),
+                buf_entry(5, &bufs.tet_info),
+                buf_entry(6, &pick_params),
             ],
         });
 
@@ -434,49 +376,7 @@ impl Pipelines {
             cache: None,
         });
 
-        // --- Mark split pipeline ---
-        let mark_split_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("mark_split.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(
-                include_str!("../shaders/mark_split.wgsl").into(),
-            ),
-        });
-
-        let mark_split_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-
-        let mark_split_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("mark_split_bgl"),
-            entries: &[
-                storage_ro_entry(0),  // insert_list
-                storage_rw_entry(1),  // tet_to_vert
-                uniform_entry(2),     // params
-            ],
-        });
-
-        let mark_split_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mark_split_bg"),
-            layout: &mark_split_bgl,
-            entries: &[
-                buf_entry(0, &bufs.insert_list),
-                buf_entry(1, &bufs.tet_to_vert),
-                buf_entry(2, &mark_split_params),
-            ],
-        });
-
-        let mark_split_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("mark_split_pl"),
-            bind_group_layouts: &[&mark_split_bgl],
-            push_constant_ranges: &[],
-        });
-
-        let mark_split_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("mark_split"),
-            layout: Some(&mark_split_pl),
-            module: &mark_split_shader,
-            entry_point: Some("mark_split"),
-            compilation_options: Default::default(),
-            cache: None,
-        });
+        // --- Mark split pipeline - REMOVED (obsolete) ---
 
         // --- Split points pipeline ---
         let split_points_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1332,9 +1232,6 @@ impl Pipelines {
             init_pipeline,
             init_bind_group,
             init_params,
-            locate_pipeline,
-            locate_bind_group,
-            locate_params,
             vote_pipeline,
             vote_bind_group,
             vote_params,
@@ -1347,9 +1244,6 @@ impl Pipelines {
             update_vert_free_pipeline,
             update_vert_free_bind_group,
             update_vert_free_params,
-            mark_split_pipeline,
-            mark_split_bind_group,
-            mark_split_params,
             split_points_pipeline,
             split_points_bind_group,
             split_pipeline,

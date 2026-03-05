@@ -20,6 +20,7 @@
 
 const TET_ALIVE: u32 = 1u;
 const TET_CHANGED: u32 = 2u;
+const OPP_SPHERE_FAIL: u32 = 16u;  // Bit 4 of TetOpp encoding
 
 const COUNTER_FLIP: u32 = 2u;
 
@@ -521,7 +522,9 @@ fn check_delaunay_exact(
             continue; // No insphere failure
         }
 
-        // We have insphere failure
+        // We have insphere failure - set OPP_SPHERE_FAIL flag (CUDA: KerPredicates.cu:584)
+        let old_opp = atomicLoad(&tet_opp[bot_ti_u * 4u + bot_vi]);
+        atomicOr(&tet_opp[bot_ti_u * 4u + bot_vi], OPP_SPHERE_FAIL);
 
         if bot_cor_ord_vi < 3u {
             // 3-2 flip confirmed

@@ -243,6 +243,12 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Get the actual vertex ID for this uninserted point
     let vertex = uninserted[vert_idx];
 
+    // Self-insertion check (CUDA: KerPredicates.cu:228)
+    // Don't update vert_tet for the vertex that's being inserted
+    if split_vertex == vertex {
+        return;
+    }
+
     // Load the original tet being split
     let tet = tets[tet_idx];
 

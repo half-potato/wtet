@@ -13,29 +13,6 @@ impl GpuState {
         pass.dispatch_workgroups(1, 1, 1);
     }
 
-    /// Dispatch point location for `num_uninserted` points.
-    pub fn dispatch_locate(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
-        num_uninserted: u32,
-    ) {
-        // Update params
-        queue.write_buffer(
-            &self.pipelines.locate_params,
-            0,
-            bytemuck::cast_slice(&[num_uninserted, 512u32, 0u32, 0u32]),
-        );
-
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("locate"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipelines.locate_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.locate_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
-    }
-
     /// Dispatch vote for point.
     pub fn dispatch_vote(
         &self,
@@ -43,10 +20,13 @@ impl GpuState {
         queue: &wgpu::Queue,
         num_uninserted: u32,
     ) {
+        // Pass num_uninserted and inf_idx to shader
+        // inf_idx = num_points (infinity vertex is after all real points)
+        let inf_idx = self.num_points;
         queue.write_buffer(
             &self.pipelines.vote_params,
             0,
-            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[num_uninserted, inf_idx, 0u32, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -59,8 +39,9 @@ impl GpuState {
     }
 
     /// Dispatch pick winner.
-    /// Uses TET-PARALLEL iteration (user requested CUDA's vertex-parallel logic,
-    /// but that doesn't work well with our pipeline where point_location runs before vote).
+    /// Uses VERTEX-PARALLEL iteration matching CUDA's kerPickWinnerPoint (KerDivision.cu:311-335).
+    /// Each uninserted vertex checks if it won its tet and competes via atomicMin.
+    /// Entry point: vote.wgsl::pick_winner_point
     pub fn dispatch_pick_winner(
         &self,
         encoder: &mut wgpu::CommandEncoder,
@@ -105,27 +86,9 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
     }
 
-    /// Dispatch mark split (marks tets being split for concurrent detection).
-    pub fn dispatch_mark_split(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        queue: &wgpu::Queue,
-        num_insertions: u32,
-    ) {
-        queue.write_buffer(
-            &self.pipelines.mark_split_params,
-            0,
-            bytemuck::cast_slice(&[num_insertions, 0u32, 0u32, 0u32]),
-        );
-
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("mark_split"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipelines.mark_split_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.mark_split_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
-    }
+    // REMOVED: dispatch_mark_split
+    // mark_split.wgsl was obsolete - pick_winner_point already populates tet_to_vert
+    // See MEMORY.md "Obsolete Shader Cleanup (2026-03-04)"
 
     /// Dispatch split_points (updates vert_tet for uninserted vertices whose tets are splitting).
     pub fn dispatch_split_points(
@@ -210,12 +173,13 @@ impl GpuState {
         encoder: &mut wgpu::CommandEncoder,
         queue: &wgpu::Queue,
         queue_size: u32,
+        inf_idx: u32,
         use_alternate: bool,
     ) {
         queue.write_buffer(
             &self.pipelines.flip_params,
             0,
-            bytemuck::cast_slice(&[queue_size, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[queue_size, inf_idx, 0u32, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -233,7 +197,17 @@ impl GpuState {
     }
 
     /// Dispatch reset votes.
-    pub fn dispatch_reset_votes(&self, encoder: &mut wgpu::CommandEncoder) {
+    /// CRITICAL: Updates params buffer with current num_uninserted before dispatch.
+    /// CUDA Reference: GpuDelaunay.cu:953 (tetSphereVec.assign with current vertNum)
+    pub fn dispatch_reset_votes(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_uninserted: u32) {
+        // Update params buffer with current num_uninserted (changes each iteration)
+        // CUDA allocates fresh arrays each iteration; WGPU reuses buffers but updates size params
+        queue.write_buffer(
+            &self.pipelines.reset_votes_params,
+            0,
+            bytemuck::cast_slice(&[self.max_tets, num_uninserted, 0u32, 0u32]),
+        );
+
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("reset_votes"),
             timestamp_writes: None,

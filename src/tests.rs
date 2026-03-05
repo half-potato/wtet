@@ -211,16 +211,6 @@ fn test_gpu_init_shader_compiles() {
 }
 
 #[test]
-fn test_gpu_point_location_shader_compiles() {
-    with_gpu(|device, _queue| {
-        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("point_location.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/point_location.wgsl").into()),
-        });
-    });
-}
-
-#[test]
 fn test_gpu_split_shader_compiles() {
     with_gpu(|device, _queue| {
         let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -1171,15 +1161,9 @@ fn test_gpu_vote_shader_compiles() {
     });
 }
 
-#[test]
-fn test_gpu_pick_winner_shader_compiles() {
-    with_gpu(|device, _queue| {
-        let _module = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("pick_winner.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/pick_winner.wgsl").into()),
-        });
-    });
-}
+// REMOVED: test_gpu_pick_winner_shader_compiles
+// pick_winner.wgsl was obsolete - vote.wgsl::pick_winner_point is used instead
+// See MEMORY.md "Obsolete Shader Cleanup (2026-03-04)"
 
 #[test]
 fn test_gpu_reset_votes_shader_compiles() {
@@ -1390,20 +1374,6 @@ fn test_minimal_buffer_creation() {
         eprintln!("TEST: ✓ Buffers created successfully");
     });
     eprintln!("TEST: Test completed");
-}
-
-#[test]
-fn test_config_centroid_rule() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(100, 33333);
-        let config = GDelConfig {
-            insertion_rule: InsertionRule::Centroid,
-            ..Default::default()
-        };
-        let (normalized, result) = run_delaunay(device, queue, &points, &config);
-        let v = validate_full(&normalized, &result.tets, &result.adjacency);
-        assert!(v.is_ok(), "Centroid rule: {}", v.unwrap_err());
-    });
 }
 
 #[test]

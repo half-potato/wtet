@@ -15,11 +15,39 @@
 @group(0) @binding(4) var<storage, read_write> vert_sphere: array<i32>;
 @group(0) @binding(5) var<storage, read> vert_tet: array<u32>;
 @group(0) @binding(6) var<storage, read> uninserted: array<u32>;
-@group(0) @binding(7) var<uniform> params: vec4<u32>; // x = num_uninserted
+@group(0) @binding(7) var<uniform> params: vec4<u32>; // x = num_uninserted, y = inf_idx (infinity vertex)
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const NO_VOTE: i32 = i32(0x80000000u);  // Minimum i32 for atomicMax voting
 const TET_ALIVE: u32 = 1u;
+
+// TetViAsSeenFrom[vi] returns the 3 other vertices in order when viewed from vertex vi
+// CUDA Reference: CommonTypes.h:128-133
+// NOTE: Cannot use as constant array (variable indexing causes SIGSEGV)
+// Implemented as explicit branches in infinity handling code below
+
+// Fast orient3d: returns determinant (positive = point is on left side of plane)
+// CUDA Reference: KerShewchuk.h orient3dfast()
+fn orient3d_fast(
+    ax: f32, ay: f32, az: f32,
+    bx: f32, by: f32, bz: f32,
+    cx: f32, cy: f32, cz: f32,
+    dx: f32, dy: f32, dz: f32,
+) -> f32 {
+    let adx = ax - dx;
+    let bdx = bx - dx;
+    let cdx = cx - dx;
+    let ady = ay - dy;
+    let bdy = by - dy;
+    let cdy = cy - dy;
+    let adz = az - dz;
+    let bdz = bz - dz;
+    let cdz = cz - dz;
+
+    return (adx * (bdy * cdz - bdz * cdy))
+         + (bdx * (cdy * adz - cdz * ady))
+         + (cdx * (ady * bdz - adz * bdy));
+}
 
 // Fast insphere: returns (det, uncertain) where uncertain=1.0 if error bounds exceeded
 fn insphere_fast(
@@ -86,38 +114,97 @@ fn vote_for_point(
     if tet_idx == INVALID {
         return;
     }
+    // Bounds check: defensive programming (not in CUDA but prevents out-of-bounds)
+    if tet_idx >= arrayLength(&tets) {
+        return;
+    }
     if (tet_info[tet_idx] & TET_ALIVE) == 0u {
         return;
     }
 
     // NOW get the vertex ID from uninserted array (after tet validation)
     let vert_idx = uninserted[idx];
-        return;
-    }
-    if (tet_info[tet_idx] & TET_ALIVE) == 0u {
-        return;
-    }
 
     // Use insphere determinant (circumcenter) for voting
     // Port of CUDA kerVoteForPoint (KerPredicates.cu:160-200)
+    // With infinity handling from KerPredWrapper.h:888-895
     let tet = tets[tet_idx];
     let p = points[vert_idx].xyz;  // vert_idx is vertex ID, used for geometry
+    let inf_idx = params.y;  // Infinity vertex index
 
-    // Compute insphere determinant
-    let pa = points[tet.x].xyz;
-    let pb = points[tet.y].xyz;
-    let pc = points[tet.z].xyz;
-    let pd = points[tet.w].xyz;
+    // Validate inf_idx: defensive programming (not in CUDA but prevents corruption)
+    if inf_idx >= arrayLength(&points) {
+        return;
+    }
 
-    let result = insphere_fast(
-        pa.x, pa.y, pa.z,
-        pb.x, pb.y, pb.z,
-        pc.x, pc.y, pc.z,
-        pd.x, pd.y, pd.z,
-        p.x, p.y, p.z
-    );
+    var sphere_val: f32;
 
-    var sphere_val = result.x;  // det (positive = outside sphere)
+    // Check if tet contains infinity vertex
+    // CUDA Reference: KerPredWrapper.h:889-895 (inSphereDet)
+    if (tet.x == inf_idx || tet.y == inf_idx || tet.z == inf_idx || tet.w == inf_idx) {
+        // Tet contains infinity - use orient3d instead of insphere
+        // CRITICAL: Cannot use variable indexing into arrays (causes SIGSEGV)
+        // Must use explicit branches for TetViAsSeenFrom lookup
+
+        var v0: u32;
+        var v1: u32;
+        var v2: u32;
+
+        // TetViAsSeenFrom[inf_vi] gives the 3 other vertices in order
+        if (tet.x == inf_idx) {
+            // From vertex 0: {1, 3, 2}
+            v0 = tet.y;
+            v1 = tet.w;
+            v2 = tet.z;
+        } else if (tet.y == inf_idx) {
+            // From vertex 1: {0, 2, 3}
+            v0 = tet.x;
+            v1 = tet.z;
+            v2 = tet.w;
+        } else if (tet.z == inf_idx) {
+            // From vertex 2: {0, 3, 1}
+            v0 = tet.x;
+            v1 = tet.w;
+            v2 = tet.y;
+        } else {
+            // From vertex 3: {0, 1, 2}
+            v0 = tet.x;
+            v1 = tet.y;
+            v2 = tet.z;
+        }
+
+        let pa = points[v0].xyz;
+        let pb = points[v1].xyz;
+        let pc = points[v2].xyz;
+
+        // Use orient3d to check convexity (negated, CUDA line 895)
+        let det = orient3d_fast(
+            pa.x, pa.y, pa.z,
+            pb.x, pb.y, pb.z,
+            pc.x, pc.y, pc.z,
+            p.x, p.y, p.z
+        );
+        sphere_val = -det;  // Negate to match CUDA
+    } else {
+        // Regular tet - use insphere
+        let pa = points[tet.x].xyz;
+        let pb = points[tet.y].xyz;
+        let pc = points[tet.z].xyz;
+        let pd = points[tet.w].xyz;
+
+        let result = insphere_fast(
+            pa.x, pa.y, pa.z,
+            pb.x, pb.y, pb.z,
+            pc.x, pc.y, pc.z,
+            pd.x, pd.y, pd.z,
+            p.x, p.y, p.z
+        );
+
+        // CRITICAL: Negate determinant to match CUDA convention!
+        // CUDA (KerPredWrapper.h:898): det = -insphereDet(...)
+        // After negation: positive = inside sphere (should insert), negative = outside
+        sphere_val = -result.x;
+    }
 
     // CUDA line 186-187: Clamp negative values to 0
     if sphere_val < 0.0 {
@@ -142,7 +229,8 @@ fn vote_for_point(
 @group(0) @binding(2) var<storage, read> vert_tet2: array<u32>;
 @group(0) @binding(3) var<storage, read_write> tet_to_vert: array<atomic<u32>>;
 @group(0) @binding(4) var<storage, read> uninserted2: array<u32>;
-@group(0) @binding(5) var<uniform> params2: vec4<u32>; // x = num_uninserted
+@group(0) @binding(5) var<storage, read> tet_info2: array<u32>;
+@group(0) @binding(6) var<uniform> params2: vec4<u32>; // x = num_uninserted
 
 @compute @workgroup_size(64)
 fn pick_winner_point(
@@ -174,9 +262,13 @@ fn pick_winner_point(
     if tet_idx == INVALID {
         return;
     }
-
-    // Get vertex ID from uninserted array (idx is position, not vertex ID)
-    let vert_idx = uninserted2[idx];
+    // Bounds check: defensive programming (not in CUDA but prevents out-of-bounds)
+    if tet_idx >= arrayLength(&tet_vote2) {
+        return;
+    }
+    // Alive check: for consistency with vote_for_point and build_insert_list
+    // (Technically redundant since vote_for_point already filtered, but defensive)
+    if (tet_info2[tet_idx] & TET_ALIVE) == 0u {
         return;
     }
 
@@ -226,18 +318,16 @@ fn build_insert_list(
     if tet_idx == INVALID {
         return;
     }
+    // Bounds check: defensive programming (not in CUDA but prevents out-of-bounds)
+    if tet_idx >= arrayLength(&tet_info3) {
+        return;
+    }
     if (tet_info3[tet_idx] & TET_ALIVE) == 0u {
         return;
     }
 
     // Get vertex ID from uninserted array (idx is position, not vertex ID)
     let vert_idx = uninserted3[idx];
-        return;
-    }
-
-    if (tet_info3[tet_idx] & TET_ALIVE) == 0u {
-        return;
-    }
 
     // CUDA line 884: Check if this vertex is the winner for its tet
     if tet_to_vert3[tet_idx] == idx {

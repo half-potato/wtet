@@ -16,6 +16,9 @@ pub struct GpuState {
     pub current_tet_num: u32,
     /// Points that still need to be inserted (indices into the point array).
     pub uninserted: Vec<u32>,
+    /// Vote offset for separating insertion votes from flip votes
+    /// CUDA Reference: GpuDelaunay.cu:1121-1128
+    pub vote_offset: u32,
 }
 
 impl GpuState {
@@ -71,6 +74,7 @@ impl GpuState {
             max_tets,
             current_tet_num: 1, // Start with 1 (super-tet created by init kernel)
             uninserted,
+            vote_offset: max_tets, // Initialize to max (CUDA uses INT_MAX, we use max_tets)
         }
     }
 

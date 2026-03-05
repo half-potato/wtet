@@ -275,8 +275,8 @@ fn check_delaunay_fast(
             continue; // No insphere failure
         }
 
-        // We have insphere failure
-        bot_opp[bot_vi] = bot_opp[bot_vi] | OPP_SPHERE_FAIL;
+        // We have insphere failure - set OPP_SPHERE_FAIL flag (CUDA: KerPredicates.cu:584)
+        atomicOr(&tet_opp[bot_ti_u * 4u + bot_vi], OPP_SPHERE_FAIL);
 
         if bot_cor_ord_vi < 3u {
             // 3-2 flip confirmed

@@ -86,7 +86,8 @@ pub async fn run(
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
-        state.dispatch_reset_votes(&mut encoder);
+        // CRITICAL: Must pass num_uninserted to clear correct range
+        state.dispatch_reset_votes(&mut encoder, queue, num_uninserted);
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::Maintain::Wait);
@@ -164,11 +165,9 @@ pub async fn run(
             num_uninserted
         );
 
-        // 5a. Mark split (for concurrent split detection)
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_mark_split(&mut encoder, queue, num_inserted);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::Maintain::Wait);
+        // 5a. Mark split - REMOVED (redundant)
+        // mark_split.wgsl was obsolete - pick_winner_point already populates tet_to_vert
+        // See MEMORY.md "Obsolete Shader Cleanup (2026-03-04)"
 
         // 5c. Split points (update vert_tet for vertices whose tets are splitting)
         // Reset scratch counters
@@ -226,7 +225,19 @@ pub async fn run(
             // Initialize active tet vector with newly split tets (4 per insertion)
             // TODO: Populate act_tet_vec from split operation
             let mut flip_queue_size = num_inserted * 4;
-            let vote_offset = 0u32; // TODO: Implement vote offset management
+
+            // Manage vote offset to separate insertion and flip voting
+            // CUDA Reference: GpuDelaunay.cu:1121-1128
+            let tet_num = state.current_tet_num;
+            if state.vote_offset < tet_num {
+                // Not enough space - reset tet_vote buffer and offset
+                // In CUDA this does: _tetVoteVec.assign(_tetVoteVec.capacity(), INT_MAX)
+                // For WGPU, we rely on reset_votes being called each iteration
+                state.vote_offset = state.max_tets;
+            }
+            state.vote_offset -= tet_num;
+            let vote_offset = state.vote_offset;
+
             let use_alternate = false; // TODO: Implement double buffering if needed
 
             // Track flip batch boundaries for relocateAll
@@ -286,7 +297,8 @@ pub async fn run(
 
                 // STEP 5: FLIP - Perform the flips
                 let mut encoder = device.create_command_encoder(&Default::default());
-                state.dispatch_flip(&mut encoder, queue, flip_count, use_alternate);
+                let inf_idx = state.num_points;  // Infinity point index
+                state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::Maintain::Wait);
 
@@ -376,7 +388,8 @@ pub async fn run(
 
                     // STEP 5: FLIP - Perform the flips
                     let mut encoder = device.create_command_encoder(&Default::default());
-                    state.dispatch_flip(&mut encoder, queue, flip_count, use_alternate);
+                    let inf_idx = state.num_points;  // Infinity point index
+                    state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
                     queue.submit(Some(encoder.finish()));
                     device.poll(wgpu::Maintain::Wait);
 
