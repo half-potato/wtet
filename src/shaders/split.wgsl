@@ -198,39 +198,11 @@ fn split_tetra(
     tets[t2] = vec4<u32>(v0, v3, v1, vertex);  // vi=2: AsSeenFrom[2] = {0,3,1}
     tets[t3] = vec4<u32>(v0, v1, v2, vertex);  // vi=3: AsSeenFrom[3] = {0,1,2}
 
+    // Memory barrier: Ensure vertex writes are visible before TET_ALIVE flag is set
+    // (Prevents race where another thread reads TET_ALIVE=1 with stale vertices)
+    storageBarrier();
+
     breadcrumb(tid, CRUMB_AFTER_WRITE_ALL);
-
-    // ═══════════════════════════════════════════════════════════════════════════
-    // Donate old tet back to its owner's free list
-    // ═══════════════════════════════════════════════════════════════════════════
-    // DONATION LOGIC - Port of CUDA KerDivision.cu:181-188
-    //
-    // CUDA:
-    //   const int blkIdx  = tetIdx / MeanVertDegree;
-    //   const int vertIdx = ( blkIdx < insVertVec._num ) ? insVertVec._arr[ blkIdx ] : infIdx;
-    //   const int freeIdx = atomicAdd( &vertFreeArr[ vertIdx ], 1 );
-    //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
-    //   setTetAliveState( tetInfoArr[ tetIdx ], false );
-    //
-    // Issue #3 Fix: Use pre-computed block_owner lookup (matches CUDA's array lookup)
-    //
-    // Calculate which block this tet belongs to
-    let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
-
-    // Lookup owner from pre-computed buffer (replaces CUDA's insVertVec._arr[blkIdx])
-    let owner_vertex = block_owner[blk_idx];
-
-    // Atomically increment this vertex's free count and get the slot index
-    let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
-
-    // Store old_tet in the owner's free list
-    free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot_idx] = old_tet;
-
-    // Mark old tet as dead
-    tet_info[old_tet] = 0u;
-    // ═══════════════════════════════════════════════════════════════════════════
-
-    breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);
 
     // Internal adjacency using CUDA's IntSplitFaceOpp table:
     // IntSplitFaceOpp[4][6] = {
@@ -338,6 +310,42 @@ fn split_tetra(
     tet_to_vert[t1] = INVALID;
     tet_to_vert[t2] = INVALID;
     tet_to_vert[t3] = INVALID;
+
+    // ═══════════════════════════════════════════════════════════════════════════
+    // Donate old tet back to its owner's free list (MOVED TO END)
+    // ═══════════════════════════════════════════════════════════════════════════
+    // CRITICAL FIX: Mark old tet as dead AFTER all new tets are fully written,
+    // marked alive, and external adjacency is set. This prevents race conditions
+    // where neighbors see the old tet as dead while trying to update adjacency.
+    //
+    // DONATION LOGIC - Port of CUDA KerDivision.cu:181-188
+    //
+    // CUDA:
+    //   const int blkIdx  = tetIdx / MeanVertDegree;
+    //   const int vertIdx = ( blkIdx < insVertVec._num ) ? insVertVec._arr[ blkIdx ] : infIdx;
+    //   const int freeIdx = atomicAdd( &vertFreeArr[ vertIdx ], 1 );
+    //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
+    //   setTetAliveState( tetInfoArr[ tetIdx ], false );
+    //
+    // Issue #3 Fix: Use pre-computed block_owner lookup (matches CUDA's array lookup)
+    //
+    // Calculate which block this tet belongs to
+    let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
+
+    // Lookup owner from pre-computed buffer (replaces CUDA's insVertVec._arr[blkIdx])
+    let owner_vertex = block_owner[blk_idx];
+
+    // Atomically increment this vertex's free count and get the slot index
+    let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
+
+    // Store old_tet in the owner's free list
+    free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot_idx] = old_tet;
+
+    // Mark old tet as dead (now safe to do after all adjacency updates)
+    tet_info[old_tet] = 0u;
+    // ═══════════════════════════════════════════════════════════════════════════
+
+    breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);
 
     // Update active count (+4 new, -1 old = net +3)
     atomicAdd(&counters[COUNTER_ACTIVE], 3u);

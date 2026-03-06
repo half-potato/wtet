@@ -121,6 +121,24 @@ impl GpuState {
             {
                 continue;
             }
+            // NEW: Filter out tets with all-zero or invalid vertices
+            // (Prevents uninitialized tets from passing through)
+            if t.v[0] == 0 && t.v[1] == 0 && t.v[2] == 0 && t.v[3] == 0 {
+                eprintln!("[READBACK] Skipping invalid tet {} with zero vertices", i);
+                continue;
+            }
+            // Also filter out tets with out-of-range vertices
+            if t.v[0] > num_points + 4
+                || t.v[1] > num_points + 4
+                || t.v[2] > num_points + 4
+                || t.v[3] > num_points + 4
+            {
+                eprintln!(
+                    "[READBACK] Skipping tet {} with out-of-range vertices {:?}",
+                    i, t.v
+                );
+                continue;
+            }
             idx_map.insert(i, tets.len()); // buffer_idx → output_idx
             tets.push(t.v);
         }

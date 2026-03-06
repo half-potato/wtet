@@ -60,7 +60,9 @@ fn relocate_points(
     }
 
     let vert_idx = uninserted[gid.x];
-    let tet_idx = vert_tet[vert_idx];
+    // CRITICAL: vert_tet is position-indexed, NOT vertex-indexed!
+    // Use gid.x (position in uninserted array), not vert_idx (vertex ID)
+    let tet_idx = vert_tet[gid.x];
 
     // If current tet is still alive, we might still be inside it — keep it
     if tet_idx != INVALID && (tet_info[tet_idx] & TET_ALIVE) != 0u {
@@ -68,5 +70,5 @@ fn relocate_points(
     }
 
     // Tet was destroyed by a flip — set INVALID, will be updated by split_points
-    vert_tet[vert_idx] = INVALID;
+    vert_tet[gid.x] = INVALID;
 }
