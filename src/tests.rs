@@ -331,16 +331,21 @@ fn test_delaunay_4_points() {
         );
 
         let mut seen = [false; 4];
+        let mut alive_count = 0;
         for i in 0..max {
             if (info_raw[i].flags & crate::types::TET_ALIVE) == 0 {
                 continue;
             }
+            alive_count += 1;
+            eprintln!("[DEBUG] Alive tet {}: vertices = {:?}", i, tets_raw[i].v);
             for &v in &tets_raw[i].v {
                 if (v as usize) < 4 {
                     seen[v as usize] = true;
                 }
             }
         }
+        eprintln!("[DEBUG] Total alive tets: {}", alive_count);
+        eprintln!("[DEBUG] Points seen: {:?}", seen);
         for (i, &s) in seen.iter().enumerate() {
             assert!(s, "Point {} not found in any tet", i);
         }

@@ -50,18 +50,15 @@ pub async fn run(
 
         // Debug: Check vert_tet at start of iteration
         if iteration == 2 {
-            // Check vert_tet for uninserted vertices
+            // Check vert_tet for uninserted vertices (by POSITION, not vertex ID!)
             let uninserted_verts: Vec<u32> = state.uninserted.clone();
-            let mut vert_tet_values = Vec::new();
-            for &v in &uninserted_verts {
-                let vert_tet_debug: Vec<u32> = state
-                    .buffers
-                    .read_buffer_as(device, queue, &state.buffers.vert_tet, (v+1) as usize)
-                    .await;
-                vert_tet_values.push(vert_tet_debug[v as usize]);
-            }
+            let num_pos = uninserted_verts.len();
+            let vert_tet_debug: Vec<u32> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.vert_tet, num_pos)
+                .await;
             println!("[DEBUG] Iteration 2 start: uninserted verts = {:?}", uninserted_verts);
-            println!("[DEBUG] Iteration 2 start: vert_tet values = {:?}", vert_tet_values);
+            println!("[DEBUG] Iteration 2 start: vert_tet[0..{}] = {:?}", num_pos, &vert_tet_debug[0..num_pos]);
 
             // Check if those tets are alive
             let tet_info_debug: Vec<u32> = state
@@ -133,15 +130,6 @@ pub async fn run(
 
         println!("[DEBUG] Iteration {}: num_inserted = {}", iteration, num_inserted);
 
-        // Debug: Check insert_list content
-        if iteration == 1 && num_inserted > 0 {
-            let insert_list_debug: Vec<[u32; 2]> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
-                .await;
-            println!("[DEBUG] Iteration 1: insert_list = {:?}", insert_list_debug);
-        }
-
         if num_inserted == 0 {
             // Debug: Read back vert_tet and tet_vert to see why no winners
             println!("[DEBUG] No winners found! Investigating...");
@@ -151,12 +139,22 @@ pub async fn run(
             break;
         }
 
+        // Read insert_list for expansion
+        let insert_list: Vec<[u32; 2]> = state
+            .buffers
+            .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
+            .await;
+
+        if iteration <= 2 {
+            println!("[DEBUG] Iteration {}: insert_list = {:?}", iteration, insert_list);
+        }
+
         // Expand tetrahedron list to make room for new insertions
         // Port of expandTetraList() call from GpuDelaunay.cu:844
         // CRITICAL: Expand by num_inserted (winners this iteration), NOT num_uninserted (all remaining)!
         // CUDA: expandTetraList( &realInsVertVec, ... ) where realInsVertVec.size() == _insNum
         let mut encoder = device.create_command_encoder(&Default::default());
-        state.expand_tetra_list(&mut encoder, queue, num_inserted);
+        state.expand_tetra_list(&mut encoder, queue, num_inserted, &insert_list);
 
         println!(
             "[DEBUG] Iteration {}: Inserting {} points (uninserted before removal: {})",
@@ -177,13 +175,6 @@ pub async fn run(
         state.dispatch_split_points(&mut encoder, queue, num_uninserted);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-        // Debug: Check how many vert_tet updates split_points made
-        if iteration <= 2 {
-            let counters = state.buffers.read_counters(device, queue).await;
-            println!("[DEBUG] Iteration {}: split_points: {} threads entered, {} had valid tet, {} updated",
-                iteration, counters.scratch[1], counters.scratch[2], counters.scratch[0]);
-        }
 
         // 5d. Split
         println!("[DEBUG] Dispatching split with num_inserted = {}", num_inserted);

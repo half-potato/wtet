@@ -29,6 +29,7 @@
 @group(0) @binding(9) var<storage, read_write> tet_to_vert: array<u32>; // maps old_tet_idx -> vertex being inserted (or INVALID)
 @group(0) @binding(10) var<uniform> params: vec4<u32>; // x = num_insertions, y = inf_idx, z = current_tet_num
 @group(0) @binding(11) var<storage, read> block_owner: array<u32>; // Pre-computed block ownership (Issue #3 fix)
+@group(0) @binding(12) var<storage, read> uninserted: array<u32>; // Maps position -> vertex ID
 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
 // @group(0) @binding(11) var<storage, read_write> breadcrumbs: array<u32>; // debug: progress tracking
 // @group(0) @binding(12) var<storage, read_write> thread_debug: array<vec4<u32>>; // debug: 16 slots per thread
@@ -142,9 +143,12 @@ fn split_tetra(
     let v2 = orig.z;
     let v3 = orig.w;
 
+    // Get the actual vertex ID (p is position in uninserted array, not vertex ID!)
+    let vertex = uninserted[p];
+
     // Allocate 4 new tet slots from vertex's pre-reserved block
     // Uses CUDA's simple approach: read 4 consecutive slots from end of block
-    let new_slots = get_free_slots_4tet(p);
+    let new_slots = get_free_slots_4tet(vertex);
     let t0 = new_slots.x;
     let t1 = new_slots.y;
     let t2 = new_slots.z;
@@ -187,12 +191,12 @@ fn split_tetra(
     //                       tet._v[TetViAsSeenFrom[vi][2]],
     //                       splitVertex }
     // TetViAsSeenFrom: {1,3,2}, {0,2,3}, {0,3,1}, {0,1,2}
-    tets[t0] = vec4<u32>(v1, v3, v2, p);  // vi=0: AsSeenFrom[0] = {1,3,2}
+    tets[t0] = vec4<u32>(v1, v3, v2, vertex);  // vi=0: AsSeenFrom[0] = {1,3,2}
     breadcrumb(tid, CRUMB_AFTER_WRITE_T0);
 
-    tets[t1] = vec4<u32>(v0, v2, v3, p);  // vi=1: AsSeenFrom[1] = {0,2,3}
-    tets[t2] = vec4<u32>(v0, v3, v1, p);  // vi=2: AsSeenFrom[2] = {0,3,1}
-    tets[t3] = vec4<u32>(v0, v1, v2, p);  // vi=3: AsSeenFrom[3] = {0,1,2}
+    tets[t1] = vec4<u32>(v0, v2, v3, vertex);  // vi=1: AsSeenFrom[1] = {0,2,3}
+    tets[t2] = vec4<u32>(v0, v3, v1, vertex);  // vi=2: AsSeenFrom[2] = {0,3,1}
+    tets[t3] = vec4<u32>(v0, v1, v2, vertex);  // vi=3: AsSeenFrom[3] = {0,1,2}
 
     breadcrumb(tid, CRUMB_AFTER_WRITE_ALL);
 

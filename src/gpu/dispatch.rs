@@ -95,10 +95,16 @@ impl GpuState {
     pub fn dispatch_split_points(
         &self,
         encoder: &mut wgpu::CommandEncoder,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         num_uninserted: u32,
     ) {
-        // NOTE: No params buffer needed - shader uses arrayLength(&uninserted) to get count
+        // Write params with actual count after compaction (not buffer size!)
+        queue.write_buffer(
+            &self.pipelines.split_points_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+        );
+
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
             label: Some("split_points"),
             timestamp_writes: None,

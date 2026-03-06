@@ -14,6 +14,7 @@
 @group(0) @binding(7) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(8) var<storage, read> uninserted: array<u32>;
 @group(0) @binding(9) var<storage, read> tet_to_vert: array<u32>; // Maps tet idx -> position in uninserted array
+@group(0) @binding(10) var<uniform> params: vec4<u32>; // x = num_uninserted (actual count after compaction)
 
 const MEAN_VERTEX_DEGREE: u32 = 8u;
 const INVALID: u32 = 0xFFFFFFFFu;
@@ -241,7 +242,7 @@ fn orient3d_with_sos(
 @compute @workgroup_size(256)
 fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     let vert_idx = global_id.x;
-    let num_uninserted = arrayLength(&uninserted);
+    let num_uninserted = params.x; // Actual count after compaction, not buffer size!
 
     if (vert_idx >= num_uninserted) {
         return;

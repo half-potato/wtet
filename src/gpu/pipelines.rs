@@ -32,6 +32,7 @@ pub struct Pipelines {
     // Pipeline: split points (updates vert_tet for uninserted vertices whose tets are splitting)
     pub split_points_pipeline: wgpu::ComputePipeline,
     pub split_points_bind_group: wgpu::BindGroup,
+    pub split_points_params: wgpu::Buffer,
 
     // Pipeline: split tetra
     pub split_pipeline: wgpu::ComputePipeline,
@@ -391,6 +392,13 @@ impl Pipelines {
             ),
         });
 
+        let split_points_params = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("split_points_params"),
+            size: 16,
+            usage: wgpu::BufferUsages::UNIFORM | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
         let split_points_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("split_points_bgl"),
             entries: &[
@@ -404,6 +412,7 @@ impl Pipelines {
                 storage_rw_entry(7),  // counters
                 storage_ro_entry(8),  // uninserted
                 storage_ro_entry(9),  // tet_to_vert
+                uniform_entry(10),    // params
             ],
         });
 
@@ -421,6 +430,7 @@ impl Pipelines {
                 buf_entry(7, &bufs.counters),
                 buf_entry(8, &bufs.uninserted),
                 buf_entry(9, &bufs.tet_to_vert),
+                buf_entry(10, &split_points_params),
             ],
         });
 
@@ -464,6 +474,7 @@ impl Pipelines {
                 storage_rw_entry(9),  // tet_to_vert (read for neighbor check, write to clear)
                 uniform_entry(10),    // params
                 storage_ro_entry(11), // block_owner (pre-computed block ownership)
+                storage_ro_entry(12), // uninserted (position -> vertex ID mapping)
                 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
             ],
         });
@@ -484,6 +495,7 @@ impl Pipelines {
                 buf_entry(9, &bufs.tet_to_vert),
                 buf_entry(10, &split_params),
                 buf_entry(11, &bufs.block_owner),
+                buf_entry(12, &bufs.uninserted),
                 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
             ],
         });
@@ -1298,6 +1310,7 @@ impl Pipelines {
             update_vert_free_params,
             split_points_pipeline,
             split_points_bind_group,
+            split_points_params,
             split_pipeline,
             split_bind_group,
             split_params,

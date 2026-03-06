@@ -181,8 +181,9 @@ impl GpuState {
     pub fn expand_tetra_list(
         &mut self,
         _encoder: &mut wgpu::CommandEncoder,
-        _queue: &wgpu::Queue,
+        queue: &wgpu::Queue,
         num_new_verts: u32,
+        insert_list: &[[u32; 2]], // (tet_idx, position) pairs
     ) {
         let old_tet_num = self.current_tet_num;
         let ins_extra_space = num_new_verts * MEAN_VERTEX_DEGREE;
@@ -203,6 +204,32 @@ impl GpuState {
             eprintln!("[EXPAND] Clamping to max_tets. Some insertions may fail.");
             self.current_tet_num = self.max_tets;
             return;
+        }
+
+        // Update free_arr for vertices being inserted
+        // Each vertex V gets MEAN_VERTEX_DEGREE tets starting at old_tet_num + (position * MEAN_VERTEX_DEGREE)
+        let mut free_arr_updates: Vec<(usize, u32)> = Vec::new(); // (index, value) pairs
+
+        for (idx, &[_tet_idx, position]) in insert_list.iter().enumerate() {
+            let vertex_id = self.uninserted[position as usize];
+            let tet_base = old_tet_num + (idx as u32 * MEAN_VERTEX_DEGREE);
+            let free_arr_base = (vertex_id * MEAN_VERTEX_DEGREE) as usize;
+
+            // Update vertex's free list with its allocated tets
+            for slot in 0..MEAN_VERTEX_DEGREE {
+                free_arr_updates.push((free_arr_base + slot as usize, tet_base + slot));
+            }
+
+            eprintln!("[EXPAND] Vertex {} gets tets [{}-{}]", vertex_id, tet_base, tet_base + MEAN_VERTEX_DEGREE - 1);
+        }
+
+        // Write updates to GPU buffer
+        for (index, value) in free_arr_updates {
+            queue.write_buffer(
+                &self.buffers.free_arr,
+                (index * 4) as u64,
+                bytemuck::cast_slice(&[value]),
+            );
         }
 
         // Update current capacity
