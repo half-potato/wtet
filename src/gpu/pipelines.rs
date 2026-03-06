@@ -463,6 +463,7 @@ impl Pipelines {
                 storage_rw_entry(8),  // flip_queue
                 storage_rw_entry(9),  // tet_to_vert (read for neighbor check, write to clear)
                 uniform_entry(10),    // params
+                storage_ro_entry(11), // block_owner (pre-computed block ownership)
                 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
             ],
         });
@@ -482,6 +483,7 @@ impl Pipelines {
                 buf_entry(8, &bufs.flip_queue),
                 buf_entry(9, &bufs.tet_to_vert),
                 buf_entry(10, &split_params),
+                buf_entry(11, &bufs.block_owner),
                 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
             ],
         });

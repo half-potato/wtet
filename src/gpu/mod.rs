@@ -2,6 +2,7 @@ pub mod buffers;
 pub mod pipelines;
 pub mod dispatch;
 
+use std::collections::HashMap;
 use crate::types::{*, MEAN_VERTEX_DEGREE};
 use buffers::GpuBuffers;
 use pipelines::Pipelines;
@@ -32,15 +33,15 @@ impl GpuState {
         let num_points = points.len() as u32;
         eprintln!("[GPU STATE] Input: {} points", num_points);
         // For block-based allocation, need enough tets to fill all vertex blocks
-        // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots
+        // Each vertex (including 4 super-tet + 1 infinity) gets MEAN_VERTEX_DEGREE slots
         // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
-        let min_tets_for_blocks = (num_points + 4) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
+        let min_tets_for_blocks = (num_points + 5) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
         // Also consider typical Delaunay tet count (~6.5x points) + overhead for retries
         // Allocate generously: 30x points to handle worst-case insertions + flips + retries
         let typical_tets = num_points * 30;
         let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
 
-        // Build point buffer: N real points + 4 super-tet vertices
+        // Build point buffer: N real points + 4 super-tet vertices + 1 infinity
         let mut gpu_points: Vec<GpuPoint> = points
             .iter()
             .map(|p| GpuPoint::new(p[0], p[1], p[2]))
@@ -53,6 +54,10 @@ impl GpuState {
         gpu_points.push(GpuPoint::new(4.0 * big, -big, -big));  // n+1
         gpu_points.push(GpuPoint::new(-big, 4.0 * big, -big));  // n+2
         gpu_points.push(GpuPoint::new(-big, -big, 4.0 * big));  // n+3
+
+        // Infinity vertex (used for boundary faces in 5-tet initialization)
+        // Placed even farther out than super-tet vertices
+        gpu_points.push(GpuPoint::new(10.0 * big, 10.0 * big, 10.0 * big)); // n+4 (inf_idx)
 
         eprintln!("[GPU STATE] Creating buffers...");
         let buffers = GpuBuffers::new(device, &gpu_points, num_points, max_tets);
@@ -72,7 +77,7 @@ impl GpuState {
             pipelines,
             num_points,
             max_tets,
-            current_tet_num: 1, // Start with 1 (super-tet created by init kernel)
+            current_tet_num: 5, // Start with 5 (5-tet topology created by init kernel)
             uninserted,
             vote_offset: max_tets, // Initialize to max (CUDA uses INT_MAX, we use max_tets)
         }
@@ -97,25 +102,58 @@ impl GpuState {
             .read_buffer_as(device, queue, &self.buffers.tet_info, max)
             .await;
 
-        // Filter: keep only alive tets that don't reference super-tet vertices
+        // Phase 1: Filter alive tets and build buffer_idx → output_idx mapping
+        let inf_idx = num_points + 4; // Infinity vertex (after 4 super-tet vertices)
         let mut tets = Vec::new();
-        let mut adjacency = Vec::new();
+        let mut idx_map: HashMap<usize, usize> = HashMap::new();
 
         for i in 0..max {
             if (info_raw[i].flags & TET_ALIVE) == 0 {
                 continue;
             }
             let t = tets_raw[i];
-            // Skip tets that reference super-tet vertices
-            if t.v[0] >= num_points
-                || t.v[1] >= num_points
-                || t.v[2] >= num_points
-                || t.v[3] >= num_points
+            // Skip tets containing infinity vertex (internal boundary representation)
+            // Keep tets with super-tet vertices (these form the actual convex hull)
+            if t.v[0] == inf_idx
+                || t.v[1] == inf_idx
+                || t.v[2] == inf_idx
+                || t.v[3] == inf_idx
             {
                 continue;
             }
+            idx_map.insert(i, tets.len()); // buffer_idx → output_idx
             tets.push(t.v);
-            adjacency.push(opp_raw[i].opp);
+        }
+
+        // Phase 2: Remap adjacency (buffer indices → output indices)
+        let mut adjacency = Vec::new();
+        for i in 0..max {
+            if (info_raw[i].flags & TET_ALIVE) == 0 {
+                continue;
+            }
+            let t = tets_raw[i];
+            // Skip tets containing infinity vertex (same filter as phase 1)
+            if t.v[0] == inf_idx
+                || t.v[1] == inf_idx
+                || t.v[2] == inf_idx
+                || t.v[3] == inf_idx
+            {
+                continue;
+            }
+
+            let opp = &opp_raw[i].opp;
+            let mut remapped = [INVALID; 4];
+            for f in 0..4 {
+                if opp[f] == INVALID {
+                    continue;
+                }
+                let (buf_idx, face) = decode_opp(opp[f]);
+                // Remap buffer index to output index (or leave INVALID if neighbor was filtered)
+                if let Some(&out_idx) = idx_map.get(&(buf_idx as usize)) {
+                    remapped[f] = encode_opp(out_idx as u32, face);
+                }
+            }
+            adjacency.push(remapped);
         }
 
         // Read failed verts

@@ -329,10 +329,16 @@ fn build_insert_list(
     // Get vertex ID from uninserted array (idx is position, not vertex ID)
     let vert_idx = uninserted3[idx];
 
-    // CUDA line 884: Check if this vertex is the winner for its tet
+    // ┌────────────────────────────────────────────────────────────────────────┐
+    // │ CRITICAL: insert_list stores (tet_idx, POSITION), NOT (tet_idx, vert_idx)! │
+    // │ Position = idx in uninserted array, used by split.wgsl and compaction │
+    // │ CUDA ref: kerPickWinnerPoint (KerDivision.cu:311-335) uses vertex INDEX │
+    // │ DO NOT CHANGE TO vert_idx - breaks split and compaction!              │
+    // └────────────────────────────────────────────────────────────────────────┘
+    // Check if this vertex is the winner for its tet
     if tet_to_vert3[tet_idx] == idx {
-        // This vertex won - add to insert list (tet_idx, vertex_id)
+        // This vertex won - add to insert list with POSITION (idx), not vertex ID
         let slot = atomicAdd(&counters[COUNTER_INSERTED], 1u);
-        insert_list[slot] = vec2<u32>(tet_idx, vert_idx);  // Store vertex ID, not position!
+        insert_list[slot] = vec2<u32>(tet_idx, idx);  // Store position (idx), not vert_idx!
     }
 }

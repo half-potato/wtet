@@ -13,7 +13,7 @@ use types::{DelaunayResult, GDelConfig};
 /// Returns the minimum wgpu limits required by gdel3d_wgpu.
 pub fn required_limits() -> wgpu::Limits {
     let mut limits = wgpu::Limits::default();
-    limits.max_storage_buffers_per_shader_stage = 16;  // Increased for debug buffers
+    limits.max_storage_buffers_per_shader_stage = 20;  // Increased for block_owner + debug buffers
     limits.max_bind_groups = 4;
     limits
 }

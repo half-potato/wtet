@@ -88,6 +88,10 @@ pub struct GpuBuffers {
     /// Debug buffer for update_uninserted_vert_tet kernel: 4 * vec4<u32> per thread
     pub update_debug: wgpu::Buffer,
 
+    /// Block ownership lookup: u32 × max_blocks
+    /// Maps block index to owning vertex (pre-computed at initialization)
+    pub block_owner: wgpu::Buffer,
+
     pub num_points: u32,
     pub max_tets: u32,
 }
@@ -142,12 +146,12 @@ impl GpuBuffers {
 
         let vert_tet = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vert_tet"),
-            // N real points + 4 super-tet
-            size: ((num_points + 4) as u64) * 4,
+            // N real points + 4 super-tet + 1 infinity
+            size: ((num_points + 5) as u64) * 4,
             usage: storage_rw,
             mapped_at_creation: false,
         });
-        eprintln!("    ✓ vert_tet: {} bytes (num_points+4)", (num_points + 4) * 4);
+        eprintln!("    ✓ vert_tet: {} bytes (num_points+5)", (num_points + 5) * 4);
 
         // Initialize vote buffers defensively (NO_VOTE = i32::MIN = 0x80000000)
         let no_vote: i32 = i32::MIN;
@@ -167,8 +171,8 @@ impl GpuBuffers {
         });
         eprintln!("    ✓ vert_sphere: {} bytes (initialized)", num_points * 4);
 
-        // Free stack: initially filled with indices [1..max_tets) since tet 0 is the super-tet
-        let free_data: Vec<u32> = (1..max_tets).collect();
+        // Free stack: initially filled with indices [5..max_tets) since tets 0-4 are the initial 5-tet structure
+        let free_data: Vec<u32> = (5..max_tets).collect();
         let free_stack = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("free_stack"),
             contents: bytemuck::cast_slice(&free_data),
@@ -198,8 +202,8 @@ impl GpuBuffers {
                   max_vertex_blocks, max_tets);
 
         // Initialize vert_free_arr: per-vertex free slot counts
-        // Each vertex (including 4 super-tet vertices) gets MEAN_VERTEX_DEGREE slots initially
-        let num_vertices = (num_points + 4) as usize;
+        // Each vertex (including 4 super-tet vertices + 1 infinity) gets MEAN_VERTEX_DEGREE slots initially
+        let num_vertices = (num_points + 5) as usize;
         let mut vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];
 
         eprintln!("[BUFFERS] vert_free_arr: num_vertices={}, each with {} slots",
@@ -218,7 +222,7 @@ impl GpuBuffers {
 
         // Counters: 8 × u32 (atomic)
         let counter_init = GpuCounters {
-            free_count: max_tets - 1, // all slots except 0 are free
+            free_count: max_tets - 5, // all slots except 0-4 are free (5-tet initial structure)
             active_count: 0,
             inserted_count: 0,
             failed_count: 0,
@@ -379,7 +383,7 @@ impl GpuBuffers {
 
         let scatter_arr = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("scatter_arr"),
-            size: ((num_points + 4) as u64) * 4, // u32 = 4 bytes
+            size: ((num_points + 5) as u64) * 4, // u32 = 4 bytes (includes infinity)
             usage: storage_rw,
             mapped_at_creation: false,
         });
@@ -433,6 +437,34 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        // Pre-compute block ownership (Issue #3 fix for CUDA compliance)
+        // Each tet block (max_tets / MEAN_VERTEX_DEGREE) is owned by a specific vertex
+        let max_blocks = (max_tets / MEAN_VERTEX_DEGREE) as usize;
+        let mut block_owners = vec![num_points + 4; max_blocks]; // Default: inf_idx owns all blocks
+
+        // First num_points blocks: owned by real points
+        for i in 0..num_points.min(max_blocks as u32) {
+            block_owners[i as usize] = i;
+        }
+
+        // Next 4 blocks (if they exist): owned by super-tet vertices
+        for i in 0..4 {
+            let blk = num_points + i;
+            if (blk as usize) < max_blocks {
+                block_owners[blk as usize] = num_points + i;
+            }
+        }
+
+        // All remaining blocks: owned by inf_idx (already initialized above)
+
+        let block_owner = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+            label: Some("block_owner"),
+            contents: bytemuck::cast_slice(&block_owners),
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_SRC,
+        });
+
+        eprintln!("[BUFFERS] block_owner: {} blocks pre-computed", max_blocks);
+
         Self {
             points: points_buf,
             tets,
@@ -473,6 +505,7 @@ impl GpuBuffers {
             breadcrumbs,
             thread_debug,
             update_debug,
+            block_owner,
             num_points,
             max_tets,
         }

@@ -114,8 +114,9 @@ fn test_opp_encoding_zero() {
 
 #[test]
 fn test_opp_encoding_max() {
-    // Max tet index that fits in 30 bits
-    let max_tet = (1u32 << 30) - 1;
+    // Max tet index that fits in 27 bits (5-bit encoding: bits 0-1 = face, bits 2-4 = flags, bits 5-31 = tet_idx)
+    // See types.rs encode_opp/decode_opp and MEMORY.md for CUDA reference (CommonTypes.h:248-265)
+    let max_tet = (1u32 << 27) - 1;
     for face in 0..4 {
         let packed = encode_opp(max_tet, face);
         let (t, f) = decode_opp(packed);
@@ -171,7 +172,7 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     })).ok()?;
 
     let mut limits = wgpu::Limits::default();
-    limits.max_storage_buffers_per_shader_stage = 10;
+    limits.max_storage_buffers_per_shader_stage = 20;  // Increased for block_owner + debug buffers
     limits.max_bind_groups = 4;
 
     let (device, queue) = pollster::block_on(adapter.request_device(
@@ -1668,12 +1669,42 @@ fn readback_compacted(
     let opp_raw = pollster::block_on(state.buffers.read_opp(device, queue, count));
 
     // After compaction, all tets are alive and adjacency is already correct
+    // Filter out tets containing infinity vertex
+    let inf_idx = state.num_points + 4; // Infinity vertex (after 4 super-tet vertices)
     let mut tets = Vec::with_capacity(count);
     let mut adjacency = Vec::with_capacity(count);
+    let mut idx_map = std::collections::HashMap::new();
 
     for i in 0..count {
-        tets.push(tets_raw[i].v);
-        adjacency.push(opp_raw[i].opp);
+        let t = tets_raw[i].v;
+        // Skip tets containing infinity vertex (internal boundary representation)
+        // Keep tets with super-tet vertices (these form the actual convex hull)
+        if t[0] == inf_idx || t[1] == inf_idx || t[2] == inf_idx || t[3] == inf_idx {
+            continue;
+        }
+        idx_map.insert(i, tets.len());
+        tets.push(t);
+    }
+
+    // Remap adjacency indices
+    for i in 0..count {
+        let t = tets_raw[i].v;
+        if t[0] == inf_idx || t[1] == inf_idx || t[2] == inf_idx || t[3] == inf_idx {
+            continue;
+        }
+        let opp = opp_raw[i].opp;
+        let mut remapped = [INVALID; 4];
+        for f in 0..4 {
+            if opp[f] == INVALID {
+                continue;
+            }
+            let (buf_idx, face) = decode_opp(opp[f]);
+            // Remap buffer index to output index
+            if let Some(&out_idx) = idx_map.get(&(buf_idx as usize)) {
+                remapped[f] = encode_opp(out_idx as u32, face);
+            }
+        }
+        adjacency.push(remapped);
     }
 
     eprintln!("[READBACK_COMPACT] Successfully read {} tets", tets.len());

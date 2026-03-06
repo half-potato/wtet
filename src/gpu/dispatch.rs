@@ -21,8 +21,9 @@ impl GpuState {
         num_uninserted: u32,
     ) {
         // Pass num_uninserted and inf_idx to shader
-        // inf_idx = num_points (infinity vertex is after all real points)
-        let inf_idx = self.num_points;
+        // inf_idx is at position num_points+4 (after 4 super-tet vertices)
+        // Vertex layout: [0..N-1] real points, [N..N+3] super-tet, [N+4] infinity
+        let inf_idx = self.num_points + 4;
         queue.write_buffer(
             &self.pipelines.vote_params,
             0,
@@ -115,8 +116,9 @@ impl GpuState {
         num_insertions: u32,
     ) {
         // params: x = num_insertions, y = inf_idx, z = current_tet_num
-        // inf_idx is the infinity vertex (last of the 4 super-tet vertices)
-        let inf_idx = self.num_points + 3; // Super-tet vertices are at [num_points, num_points+3]
+        // inf_idx is at position num_points+4 (AFTER the 4 super-tet vertices)
+        // Super-tet vertices are at [num_points, num_points+1, num_points+2, num_points+3]
+        let inf_idx = self.num_points + 4;
         let current_tet_num = self.current_tet_num;
 
         let params_data = [num_insertions, inf_idx, current_tet_num, 0u32];
@@ -422,6 +424,9 @@ impl GpuState {
     /// Dispatch compact if negative (two-pass compaction).
     /// Returns the compacted count via reading counter[0] after both passes.
     pub fn dispatch_compact_if_negative(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, input_size: u32) {
+        // CRITICAL: Reset counters[0] and counters[1] to zero before atomic operations!
+        queue.write_buffer(&self.buffers.counters, 0, bytemuck::cast_slice(&[0u32, 0u32]));
+
         // Pass 1: Count non-negative values
         queue.write_buffer(&self.pipelines.compact_if_negative_params, 0, bytemuck::cast_slice(&[input_size, 0u32, 0u32, 0u32]));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("compact_if_negative_pass1"), timestamp_writes: None });
@@ -440,27 +445,40 @@ impl GpuState {
 
     /// Dispatch compact vertex arrays (two-pass compaction).
     /// Compacts both uninserted and vert_tet arrays by removing inserted vertices.
+    ///
+    /// CRITICAL: This function submits the encoder internally between passes to ensure
+    /// params buffer writes are properly synchronized. Returns a new encoder for the caller.
     pub fn dispatch_compact_vertex_arrays(
         &self,
-        encoder: &mut wgpu::CommandEncoder,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         num_uninserted: u32,
         num_inserted: u32,
-    ) {
+    ) -> wgpu::CommandEncoder {
+        // CRITICAL: Reset counters[0] and counters[1] to zero before atomic operations!
+        queue.write_buffer(&self.buffers.counters, 0, bytemuck::cast_slice(&[0u32, 0u32]));
+
         // Pass 1: Count vertices NOT in insert_list
         queue.write_buffer(
             &self.pipelines.compact_vertex_arrays_params,
             0,
             bytemuck::cast_slice(&[num_uninserted, num_inserted, 0u32, 0u32]),
         );
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("compact_vertex_arrays_pass1"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
-        drop(pass);
+
+        let mut encoder1 = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder1.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_vertex_arrays_pass1"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        }
+
+        // CRITICAL: Submit pass 1 BEFORE writing params for pass 2
+        queue.submit(Some(encoder1.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         // Pass 2: Compact non-inserted vertices to temp buffers
         queue.write_buffer(
@@ -468,13 +486,20 @@ impl GpuState {
             0,
             bytemuck::cast_slice(&[num_uninserted, num_inserted, 1u32, 0u32]),
         );
-        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-            label: Some("compact_vertex_arrays_pass2"),
-            timestamp_writes: None,
-        });
-        pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
-        pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+
+        let mut encoder2 = device.create_command_encoder(&Default::default());
+        {
+            let mut pass = encoder2.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_vertex_arrays_pass2"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        }
+
+        // Return encoder2 for caller to add buffer copies before final submit
+        encoder2
     }
 
     /// Dispatch relocate points fast.

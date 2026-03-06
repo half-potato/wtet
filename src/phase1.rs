@@ -443,10 +443,19 @@ pub async fn run(
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
         // GPU-accelerated compaction (FLAW #2 fix)
         {
-            let mut encoder = device.create_command_encoder(&Default::default());
+            // DEBUG: Verify insert_list before compaction
+            let insert_list_before: Vec<[u32; 2]> = state
+                .buffers
+                .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
+                .await;
+            println!(
+                "[DEBUG_COMPACT] Before compaction: insert_list = {:?}",
+                insert_list_before
+            );
 
             // Dispatch GPU compaction (2-pass: count, then scatter)
-            state.dispatch_compact_vertex_arrays(&mut encoder, queue, num_uninserted, num_inserted);
+            // Returns encoder after pass 2 for adding buffer copies
+            let mut encoder = state.dispatch_compact_vertex_arrays(device, queue, num_uninserted, num_inserted);
 
             // Copy compacted results from temp buffers back to main buffers
             encoder.copy_buffer_to_buffer(
@@ -469,7 +478,19 @@ pub async fn run(
         }
 
         // Read back compacted count and arrays
-        let new_count = state.buffers.read_compact_count(device, queue).await as usize;
+        let all_counters = state.buffers.read_counters(device, queue).await;
+        let new_count = all_counters.free_count as usize; // counter[0]
+        println!(
+            "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
+            iteration, num_uninserted, num_inserted, new_count
+        );
+        println!(
+            "[DEBUG_COMPACT] All counters: free={}, active={}, inserted={}, failed={}",
+            all_counters.free_count,
+            all_counters.active_count,
+            all_counters.inserted_count,
+            all_counters.failed_count
+        );
         let new_uninserted: Vec<u32> = state
             .buffers
             .read_buffer_as(device, queue, &state.buffers.uninserted, new_count)

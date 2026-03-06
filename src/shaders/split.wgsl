@@ -28,6 +28,7 @@
 @group(0) @binding(8) var<storage, read_write> flip_queue: array<u32>; // tets needing flip check
 @group(0) @binding(9) var<storage, read_write> tet_to_vert: array<u32>; // maps old_tet_idx -> vertex being inserted (or INVALID)
 @group(0) @binding(10) var<uniform> params: vec4<u32>; // x = num_insertions, y = inf_idx, z = current_tet_num
+@group(0) @binding(11) var<storage, read> block_owner: array<u32>; // Pre-computed block ownership (Issue #3 fix)
 // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
 // @group(0) @binding(11) var<storage, read_write> breadcrumbs: array<u32>; // debug: progress tracking
 // @group(0) @binding(12) var<storage, read_write> thread_debug: array<vec4<u32>>; // debug: 16 slots per thread
@@ -198,7 +199,7 @@ fn split_tetra(
     // ═══════════════════════════════════════════════════════════════════════════
     // Donate old tet back to its owner's free list
     // ═══════════════════════════════════════════════════════════════════════════
-    // Port of CUDA KerDivision.cu:181-188
+    // DONATION LOGIC - Port of CUDA KerDivision.cu:181-188
     //
     // CUDA:
     //   const int blkIdx  = tetIdx / MeanVertDegree;
@@ -207,16 +208,13 @@ fn split_tetra(
     //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
     //   setTetAliveState( tetInfoArr[ tetIdx ], false );
     //
+    // Issue #3 Fix: Use pre-computed block_owner lookup (matches CUDA's array lookup)
+    //
     // Calculate which block this tet belongs to
     let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
 
-    // Determine owner vertex:
-    //   - If blk_idx < inf_idx, it's a real point or super-tet vertex (owner = blk_idx)
-    //   - Otherwise, it belongs to the infinity block (owner = inf_idx)
-    var owner_vertex = blk_idx;
-    if blk_idx >= inf_idx {
-        owner_vertex = inf_idx;
-    }
+    // Lookup owner from pre-computed buffer (replaces CUDA's insVertVec._arr[blkIdx])
+    let owner_vertex = block_owner[blk_idx];
 
     // Atomically increment this vertex's free count and get the slot index
     let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
