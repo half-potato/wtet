@@ -544,7 +544,7 @@ impl GpuState {
             total_tet_num as usize
         ).await;
 
-        // Build prefix sum: prefix[i] = count of alive tets in [0..i]
+        // Build prefix sum: prefix[i] = count of alive tets in [0..=i]
         let mut prefix_sum: Vec<u32> = Vec::with_capacity(total_tet_num as usize);
         let mut count = 0u32;
         for &flags in &tet_info {
@@ -555,6 +555,31 @@ impl GpuState {
         }
 
         let new_tet_num = count;
+
+        // Debug: Check prefix sum consistency
+        let alive_count = tet_info.iter().filter(|&&f| (f & TET_ALIVE) != 0).count();
+        if alive_count != new_tet_num as usize {
+            log::error!("[COMPACT] ERROR: Prefix sum mismatch! alive_count={}, new_tet_num={}",
+                       alive_count, new_tet_num);
+        }
+
+        // Debug: Detailed alive/dead distribution
+        let dead_in_stable = tet_info.iter().take(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) == 0).count();
+        let alive_in_compaction = tet_info.iter().skip(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) != 0).count();
+        let dead_in_compaction = tet_info.iter().skip(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) == 0).count();
+
+        eprintln!("[COMPACT_DEBUG] Total: {} tets, Alive: {} ({:.1}%)",
+                  total_tet_num, new_tet_num, 100.0 * new_tet_num as f32 / total_tet_num as f32);
+        eprintln!("[COMPACT_DEBUG] Stable region [0..{}): {} dead slots need filling",
+                  new_tet_num, dead_in_stable);
+        eprintln!("[COMPACT_DEBUG] Compaction region [{}..{}): {} alive to move, {} dead to discard",
+                  new_tet_num, total_tet_num, alive_in_compaction, dead_in_compaction);
+
+        if dead_in_stable != alive_in_compaction {
+            eprintln!("[COMPACT_DEBUG] WARNING: Mismatch! {} dead slots but {} tets to move",
+                     dead_in_stable, alive_in_compaction);
+        }
+
         log::info!("[COMPACT] Active tets: {} / {}", new_tet_num, total_tet_num);
 
         // Upload prefix sum to GPU
@@ -583,6 +608,30 @@ impl GpuState {
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        // Debug: Read back free_arr and prefix_sum to verify correctness
+        if total_tet_num <= 500 {  // Only for small meshes to avoid spam
+            let free_arr_data: Vec<u32> = self.buffers.read_buffer_as(
+                device, queue, &self.buffers.free_arr, dead_in_stable.min(100)
+            ).await;
+            let prefix_sample: Vec<u32> = self.buffers.read_buffer_as(
+                device, queue, &self.buffers.prefix_sum_data,
+                ((new_tet_num as usize).min(10) + (total_tet_num as usize - new_tet_num as usize).min(10))
+            ).await;
+
+            eprintln!("[COMPACT_DEBUG] Free slots (first {}): {:?}",
+                     free_arr_data.len().min(20), &free_arr_data[..free_arr_data.len().min(20)]);
+            eprintln!("[COMPACT_DEBUG] Prefix (first 10): {:?}",
+                     &prefix_sample[..prefix_sample.len().min(10)]);
+
+            // Check for duplicate free slots
+            use std::collections::HashSet;
+            let unique_free: HashSet<u32> = free_arr_data.iter().copied().collect();
+            if unique_free.len() != free_arr_data.len() {
+                eprintln!("[COMPACT_DEBUG] ERROR: {} duplicate free slots! ({} unique vs {} total)",
+                         free_arr_data.len() - unique_free.len(), unique_free.len(), free_arr_data.len());
+            }
+        }
 
         log::info!("[COMPACT] ✓ Compaction complete, {} alive tets", new_tet_num);
 

@@ -35,7 +35,18 @@ fn make_compact_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Calculate where this tet should go
-    let free_idx = new_tet_num - prefix_arr[idx];
+    // Note: prefix_arr[idx] should always be <= new_tet_num for alive tets
+    let prefix_count = prefix_arr[idx];
+
+    // Bounds check to prevent underflow
+    if (prefix_count > new_tet_num) {
+        // ERROR: This should never happen!
+        // prefix_count > new_tet_num means more alive tets than total count
+        prefix_arr[idx] = 0u;  // Map to first slot as fallback
+        return;
+    }
+
+    let free_idx = new_tet_num - prefix_count;
     let new_tet_idx = free_arr[free_idx];
 
     // Store new index in prefix_arr (repurposing it as compact map)

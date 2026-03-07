@@ -855,9 +855,8 @@ fn check_euler(tets: &[[u32; 4]]) -> Result<(), String> {
 
 /// Check that all tetrahedra have consistent orientation (same orient3d sign).
 /// Matches DelaunayChecker::checkOrientation().
-/// Note: Only checks interior tets (skips super-tet/infinity vertices like CUDA does).
 #[cfg(test)]
-fn check_orientation(points: &[[f32; 3]], tets: &[[u32; 4]], num_real_points: u32) -> Result<(), String> {
+fn check_orientation(points: &[[f32; 3]], tets: &[[u32; 4]]) -> Result<(), String> {
     let pts64: Vec<[f64; 3]> = points
         .iter()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
@@ -866,15 +865,8 @@ fn check_orientation(points: &[[f32; 3]], tets: &[[u32; 4]], num_real_points: u3
     let mut pos_count = 0usize;
     let mut neg_count = 0usize;
     let mut zero_count = 0usize;
-    let mut skipped = 0usize;
 
     for tet in tets {
-        // Skip tets with super-tet or infinity vertices (like check_delaunay_interior)
-        if tet.iter().any(|&v| v >= num_real_points) {
-            skipped += 1;
-            continue;
-        }
-
         let o = predicates::orient3d(
             pts64[tet[0] as usize],
             pts64[tet[1] as usize],
@@ -1490,7 +1482,7 @@ fn test_orientation_consistency() {
         let points = gen_uniform_random(50, 11111);
         let config = GDelConfig::default();
         let (normalized, result) = run_delaunay(device, queue, &points, &config);
-        check_orientation(&normalized, &result.tets, points.len() as u32)
+        check_orientation(&normalized, &result.tets)
             .expect("Orientation inconsistent in stripped output");
     });
 }
@@ -1681,72 +1673,6 @@ fn readback_compacted(
     let tets_raw = pollster::block_on(state.buffers.read_tets(device, queue, count));
     let opp_raw = pollster::block_on(state.buffers.read_opp(device, queue, count));
 
-    // Debug: Check for duplicates in the raw read
-    use std::collections::HashSet;
-    use std::collections::HashMap;
-    let mut tet_counts: HashMap<[u32; 4], Vec<usize>> = HashMap::new();
-    for (i, t) in tets_raw.iter().enumerate() {
-        let mut sorted = t.v;
-        sorted.sort();
-        tet_counts.entry(sorted).or_insert_with(Vec::new).push(i);
-    }
-
-    let unique_count = tet_counts.len();
-    if unique_count != count {
-        eprintln!("[READBACK_COMPACT] WARNING: {} duplicate tets in GPU buffer! ({} unique vs {} read)",
-                  count - unique_count, unique_count, count);
-
-        // Analyze duplicate patterns
-        let mut degenerate_count = 0;
-        let mut true_duplicate_count = 0;
-
-        // Show which tets are duplicated
-        let mut dup_count = 0;
-        for (tet, indices) in &tet_counts {
-            if indices.len() > 1 {
-                // Check if degenerate (has repeated vertices)
-                let unique_verts: HashSet<u32> = tet.iter().copied().collect();
-                let is_degenerate = unique_verts.len() < 4;
-
-                if is_degenerate {
-                    degenerate_count += indices.len() - 1;
-                } else {
-                    true_duplicate_count += indices.len() - 1;
-                }
-
-                if dup_count < 10 {
-                    eprintln!("[READBACK_COMPACT]   Tet {:?} appears {} times at indices: {:?} {}",
-                             tet, indices.len(), indices,
-                             if is_degenerate { "(DEGENERATE!)" } else { "" });
-                    dup_count += 1;
-                }
-            }
-        }
-
-        eprintln!("[READBACK_COMPACT] Duplicate analysis: {} degenerate, {} true duplicates",
-                 degenerate_count, true_duplicate_count);
-
-        if degenerate_count > 0 {
-            eprintln!("[READBACK_COMPACT] ERROR: Degenerate tets found! These should not exist in valid triangulation.");
-
-            // Show degenerate tets for debugging
-            for (tet, indices) in &tet_counts {
-                if indices.len() > 1 {
-                    let unique_verts: HashSet<u32> = tet.iter().copied().collect();
-                    if unique_verts.len() < 4 {
-                        eprintln!("[READBACK_COMPACT] Degenerate tet: {:?} (unique verts: {:?}) at indices {:?}",
-                                 tet, unique_verts, indices);
-                    }
-                }
-            }
-        }
-
-        if tet_counts.iter().filter(|(_, v)| v.len() > 1).count() > 10 {
-            eprintln!("[READBACK_COMPACT]   ... and {} more duplicates",
-                     tet_counts.iter().filter(|(_, v)| v.len() > 1).count() - 10);
-        }
-    }
-
     // After compaction, all tets are alive and adjacency is already correct
     // Filter out tets containing infinity vertex
     let inf_idx = state.num_points + 4; // Infinity vertex (after 4 super-tet vertices)
@@ -1763,13 +1689,6 @@ fn readback_compacted(
         // if t[0] == inf_idx || t[1] == inf_idx || t[2] == inf_idx || t[3] == inf_idx {
         //     continue;
         // }
-
-        // FILTER: Skip uninitialized/zero tets (should not be marked ALIVE)
-        if t[0] == 0 && t[1] == 0 && t[2] == 0 && t[3] == 0 {
-            eprintln!("[READBACK_COMPACT] Skipping zero/uninitialized tet at index {}", i);
-            continue;
-        }
-
         idx_map.insert(i, tets.len());
         tets.push(t);
     }
@@ -1781,12 +1700,6 @@ fn readback_compacted(
         // if t[0] == inf_idx || t[1] == inf_idx || t[2] == inf_idx || t[3] == inf_idx {
         //     continue;
         // }
-
-        // FILTER: Skip zero tets
-        if t[0] == 0 && t[1] == 0 && t[2] == 0 && t[3] == 0 {
-            continue;
-        }
-
         let opp = opp_raw[i].opp;
         let mut remapped = [INVALID; 4];
         for f in 0..4 {
@@ -1998,10 +1911,9 @@ fn run_phase1_raw(
 }
 
 /// Check Euler characteristic for closed manifold (S^3): V-E+F-T = 0.
-/// Matches CUDA's DelaunayChecker::checkEuler() - counts ALL vertices including infinity.
-/// The complete mesh (including infinity vertex) forms a closed 3-manifold.
+/// The infinity vertex (used for boundary representation) is excluded from the count.
 #[cfg(test)]
-fn check_euler_closed(tets: &[[u32; 4]]) -> Result<(), String> {
+fn check_euler_closed(tets: &[[u32; 4]], inf_idx: Option<u32>) -> Result<(), String> {
     use std::collections::HashSet;
 
     let mut vertices = HashSet::new();
@@ -2009,57 +1921,67 @@ fn check_euler_closed(tets: &[[u32; 4]]) -> Result<(), String> {
     let mut faces: HashSet<[u32; 3]> = HashSet::new();
 
     for tet in tets {
-        // Add ALL vertices (including infinity if present)
-        // Matches CUDA: vertSet.insert( tet._v, tet._v + 4 );
         for &v in tet {
-            vertices.insert(v);
+            // Exclude infinity vertex from Euler calculation
+            // (it's used for boundary representation, not part of the S^3 manifold)
+            if Some(v) != inf_idx {
+                vertices.insert(v);
+            }
         }
-        // Add ALL edges
         for i in 0..4usize {
             for j in (i + 1)..4 {
+                // Skip edges containing infinity vertex
+                if Some(tet[i]) == inf_idx || Some(tet[j]) == inf_idx {
+                    continue;
+                }
                 let mut edge = [tet[i], tet[j]];
                 edge.sort();
                 edges.insert(edge);
             }
         }
-        // Add ALL faces
         for skip in 0..4usize {
             let mut face = [0u32; 3];
             let mut fi = 0;
+            let mut has_inf = false;
             for i in 0..4usize {
                 if i != skip {
+                    if Some(tet[i]) == inf_idx {
+                        has_inf = true;
+                        break;
+                    }
                     face[fi] = tet[i];
                     fi += 1;
                 }
             }
-            face.sort();
-            faces.insert(face);
+            // Skip faces containing infinity vertex
+            if !has_inf {
+                face.sort();
+                faces.insert(face);
+            }
         }
-    }
-
-    // Check for duplicate tets
-    let unique_tets: HashSet<[u32; 4]> = tets.iter().map(|&t| {
-        let mut sorted = t;
-        sorted.sort();
-        sorted
-    }).collect();
-    if unique_tets.len() != tets.len() {
-        eprintln!("[EULER_DEBUG] WARNING: {} duplicate tets! ({} unique vs {} total)",
-                  tets.len() - unique_tets.len(), unique_tets.len(), tets.len());
     }
 
     let v = vertices.len() as i64;
     let e = edges.len() as i64;
     let f = faces.len() as i64;
-    let t = tets.len() as i64;
-    let euler = v - e + f - t;
+    // Count only tets that don't contain the infinity vertex
+    let t = if let Some(inf) = inf_idx {
+        tets.iter()
+            .filter(|tet| !tet.iter().any(|&v| v == inf))
+            .count() as i64
+    } else {
+        tets.len() as i64
+    };
 
-    // Debug: For a closed manifold, F/T should be ~2.0 (each face shared by 2 tets)
-    let f_t_ratio = f as f64 / t as f64;
-    let face_instances = t * 4;  // Each tet has 4 faces
-    let avg_face_sharing = face_instances as f64 / f as f64;
-    eprintln!("[EULER_DEBUG] V={}, E={}, F={}, T={}, Euler={}, F/T={:.3}, avg_sharing={:.2}",
-              v, e, f, t, euler, f_t_ratio, avg_face_sharing);
+    // Debug output
+    if let Some(inf) = inf_idx {
+        let inf_tets = tets.iter().filter(|tet| tet.iter().any(|&v| v == inf)).count();
+        eprintln!("[EULER_DEBUG] Total tets: {}, Infinity tets: {}, Non-infinity tets: {}",
+                  tets.len(), inf_tets, t);
+        eprintln!("[EULER_DEBUG] V={}, E={}, F={}, T={}, Euler={}", v, e, f, t, v - e + f - t);
+    }
+
+    let euler = v - e + f - t;
 
     if euler != 0 {
         return Err(format!(
@@ -2148,8 +2070,10 @@ fn validate_raw(
     result: &DelaunayResult,
     num_real_points: u32,
 ) -> Result<(), String> {
-    check_euler_closed(&result.tets)?;
-    check_orientation(points, &result.tets, num_real_points)?;
+    // Infinity vertex index = num_real_points + 4 (after 4 super-tet vertices)
+    let inf_idx = num_real_points + 4;
+    check_euler_closed(&result.tets, Some(inf_idx))?;
+    check_orientation(points, &result.tets)?;
     check_adjacency_consistency(&result.tets, &result.adjacency)?;
     let violations =
         check_delaunay_interior(points, &result.tets, &result.adjacency, num_real_points)?;
@@ -2256,6 +2180,36 @@ fn test_raw_clustered_100() {
     });
 }
 
+#[test]
+fn test_raw_cospherical_12() {
+    let phi: f32 = (1.0 + 5.0f32.sqrt()) / 2.0;
+    let scale = 0.3;
+    let offset = 0.5;
+    let points: Vec<[f32; 3]> = vec![
+        [-1.0, phi, 0.0],
+        [1.0, phi, 0.0],
+        [-1.0, -phi, 0.0],
+        [1.0, -phi, 0.0],
+        [0.0, -1.0, phi],
+        [0.0, 1.0, phi],
+        [0.0, -1.0, -phi],
+        [0.0, 1.0, -phi],
+        [phi, 0.0, -1.0],
+        [phi, 0.0, 1.0],
+        [-phi, 0.0, -1.0],
+        [-phi, 0.0, 1.0],
+    ]
+    .into_iter()
+    .map(|[x, y, z]| [x * scale + offset, y * scale + offset, z * scale + offset])
+    .collect();
+
+    with_gpu(|device, queue| {
+        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
+        assert!(!result.tets.is_empty(), "Should produce tets");
+        let v = validate_raw(&all_pts, &result, points.len() as u32);
+        assert!(v.is_ok(), "Raw cospherical 12: {}", v.unwrap_err());
+    });
+}
 #[test]
 fn test_update_opp_shader_compiles() {
     let instance = wgpu::Instance::new(&wgpu::InstanceDescriptor {

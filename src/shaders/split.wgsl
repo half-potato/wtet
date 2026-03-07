@@ -143,8 +143,31 @@ fn split_tetra(
     let v2 = orig.z;
     let v3 = orig.w;
 
+    // VALIDATION: Check for degenerate input tet
+    // A tet is degenerate if it has repeated vertices (zero volume)
+    if (v0 == v1) || (v0 == v2) || (v0 == v3) || (v1 == v2) || (v1 == v3) || (v2 == v3) {
+        // ERROR: Cannot split degenerate tet!
+        // Mark as failed and return
+        if idx == 0u {
+            tet_info[8] = 0xBAD1u;  // Degenerate input marker
+        }
+        breadcrumb(tid, 0xBAD1u);
+        return;
+    }
+
     // Get the actual vertex ID (p is position in uninserted array, not vertex ID!)
     let vertex = uninserted[p];
+
+    // VALIDATION: Check that new vertex is distinct from tet vertices
+    // (Shouldn't happen in correct Delaunay, but defensive check)
+    if (vertex == v0) || (vertex == v1) || (vertex == v2) || (vertex == v3) {
+        // ERROR: Vertex already in tet!
+        if idx == 0u {
+            tet_info[8] = 0xBAD2u;  // Duplicate vertex marker
+        }
+        breadcrumb(tid, 0xBAD2u);
+        return;
+    }
 
     // Allocate 4 new tet slots from vertex's pre-reserved block
     // Uses CUDA's simple approach: read 4 consecutive slots from end of block

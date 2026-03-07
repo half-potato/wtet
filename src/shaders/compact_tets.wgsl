@@ -79,14 +79,27 @@ fn compact_tets(@builtin(global_invocation_id) gid: vec3<u32>) {
         let opp_idx = decode_opp_tet(opp_val);
 
         if opp_idx >= new_tet_num {
-            // Neighbor is being moved - remap to new index
-            let opp_new_idx = prefix_arr[opp_idx];
-            opp[vi] = set_opp_tet(opp_val, opp_new_idx);
+            // Neighbor is in the compaction region - check if it's alive before remapping
+            // CRITICAL: prefix_arr[opp_idx] only contains valid data for ALIVE tets!
+            // For DEAD tets, prefix_arr[opp_idx] contains garbage (original prefix sum count)
+            if is_tet_alive(tet_info[opp_idx]) {
+                // Neighbor is alive and will be moved - use its new compacted index
+                let opp_new_idx = prefix_arr[opp_idx];
+                opp[vi] = set_opp_tet(opp_val, opp_new_idx);
+            } else {
+                // Neighbor is dead - adjacency is invalid
+                opp[vi] = INVALID;
+            }
         } else {
-            // Neighbor is in stable region - update its pointer to us
-            let opp_vi = decode_opp_vi(opp_val);
-            let old_val = atomicLoad(&tet_opp[opp_idx * 4u + opp_vi]);
-            atomicStore(&tet_opp[opp_idx * 4u + opp_vi], set_opp_tet(old_val, new_tet_idx));
+            // Neighbor is in stable region - should be alive, update its pointer to us
+            if is_tet_alive(tet_info[opp_idx]) {
+                let opp_vi = decode_opp_vi(opp_val);
+                let old_val = atomicLoad(&tet_opp[opp_idx * 4u + opp_vi]);
+                atomicStore(&tet_opp[opp_idx * 4u + opp_vi], set_opp_tet(old_val, new_tet_idx));
+            } else {
+                // Neighbor is dead - mark adjacency as invalid
+                opp[vi] = INVALID;
+            }
         }
     }
 
