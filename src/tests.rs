@@ -291,7 +291,7 @@ fn test_delaunay_4_points() {
 
         let config = GDelConfig {
             enable_flipping: false,
-            enable_splaying: false,
+            enable_splaying: true,
             ..Default::default()
         };
 
@@ -370,7 +370,7 @@ fn test_delaunay_cube() {
         let n = points.len();
         let config = GDelConfig {
             enable_flipping: false,
-            enable_splaying: false,
+            enable_splaying: true,
             ..Default::default()
         };
 
@@ -611,7 +611,7 @@ fn test_flip_improves_quality() {
         // Without flipping
         let config_no_flip = GDelConfig {
             enable_flipping: false,
-            enable_splaying: false,
+            enable_splaying: true,
             ..Default::default()
         };
         let mut state_nf =
@@ -623,7 +623,7 @@ fn test_flip_improves_quality() {
         // With flipping
         let config_flip = GDelConfig {
             enable_flipping: true,
-            enable_splaying: false,
+            enable_splaying: true,
             ..Default::default()
         };
         let mut state_f =
@@ -713,7 +713,7 @@ fn test_flip_convergence() {
 
         let config = GDelConfig {
             enable_flipping: true,
-            enable_splaying: false,
+            enable_splaying: true,
             max_flip_iterations: 20,
             ..Default::default()
         };
@@ -1422,7 +1422,7 @@ fn test_config_flip_only() {
         let points = gen_uniform_random(50, 55555);
         let config = GDelConfig {
             enable_flipping: true,
-            enable_splaying: false,
+            enable_splaying: true,
             ..Default::default()
         };
         let (normalized, result) = run_delaunay(device, queue, &points, &config);

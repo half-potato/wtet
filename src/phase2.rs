@@ -9,16 +9,31 @@ use crate::types::*;
 use std::collections::HashMap;
 
 /// Perform star splaying on the CPU to fix Delaunay violations.
+///
+/// Uses the full CUDA star splaying algorithm:
+/// 1. Extract stars (link manifolds) around failed vertices
+/// 2. Perform 2D Delaunay flipping on each star's link
+/// 3. Process work queue for inter-star consistency
+/// 4. Reintegrate stars back to 3D tetrahedra
 pub fn splay(points: &[[f32; 3]], result: &mut DelaunayResult) {
     if result.failed_verts.is_empty() {
         return;
     }
 
     log::info!(
-        "Phase 2: star splaying for {} failed vertices",
+        "Phase 2: CUDA star splaying for {} failed vertices",
         result.failed_verts.len()
     );
 
+    // Use full CUDA star splaying algorithm
+    crate::cpu::fix_with_star_splaying(points, result);
+
+    log::info!("Phase 2 complete: star splaying finished");
+    return;
+
+    // OLD IMPLEMENTATION (kept for reference, never reached)
+    #[allow(unreachable_code)]
+    {
     let pts64: Vec<[f64; 3]> = points
         .iter()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
@@ -250,6 +265,7 @@ pub fn splay(points: &[[f32; 3]], result: &mut DelaunayResult) {
     result.failed_verts.clear();
 
     log::info!("Phase 2 complete: {} flips performed", flips_done);
+    } // End of old implementation
 }
 
 /// Rebuild adjacency from scratch by hashing faces.

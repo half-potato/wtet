@@ -122,6 +122,75 @@ pub fn sign(x: f64) -> i32 {
     }
 }
 
+/// Orient4D with Simulation of Simplicity (SoS) tie-breaking.
+///
+/// Determines the orientation of point `e` with respect to the hyperplane
+/// defined by points `a, b, c, d` in 4D (when lifted to paraboloid).
+///
+/// Geometrically equivalent to the insphere test:
+/// - Returns positive if `e` is inside the circumsphere of `(a,b,c,d)`
+/// - Returns negative if `e` is outside
+/// - Returns zero only for exact degeneracies (which are broken by SoS)
+///
+/// **Ported from:** gDel3D/CPU/PredWrapper.cpp doOrient4DAdaptSoS()
+///
+/// **SoS Tie-breaking:** If insphere test returns exactly zero, use vertex
+/// indices to break the tie deterministically.
+pub fn orient4d(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    d: [f64; 3],
+    e: [f64; 3],
+    a_idx: u32,
+    b_idx: u32,
+    c_idx: u32,
+    d_idx: u32,
+    e_idx: u32,
+) -> i32 {
+    // Primary test: insphere (geometrically equivalent to orient4d)
+    let sph = insphere(a, b, c, d, e);
+
+    if sph > 0.0 {
+        return 1;
+    }
+    if sph < 0.0 {
+        return -1;
+    }
+
+    // Exact zero: use SoS tie-breaking based on lexicographic vertex ordering
+    // Lower index = "below" the hyperplane in symbolic perturbation
+    //
+    // CUDA uses complex index permutation logic here. For simplicity,
+    // we use a straightforward lexicographic comparison.
+    //
+    // The key insight: SoS ensures no two points are exactly cospherical
+    // by treating lower-index vertices as symbolically "perturbed downward".
+
+    // Find the minimum index among the 5 points
+    let min_idx = a_idx.min(b_idx).min(c_idx).min(d_idx).min(e_idx);
+
+    // If `e` has the minimum index, it's "below" (inside)
+    // Otherwise, it's "above" (outside)
+    if e_idx == min_idx {
+        1 // Inside
+    } else {
+        -1 // Outside
+    }
+}
+
+/// Orient4D without SoS (for testing or when indices are not available).
+/// Returns the raw sign of the insphere test.
+pub fn orient4d_no_sos(
+    a: [f64; 3],
+    b: [f64; 3],
+    c: [f64; 3],
+    d: [f64; 3],
+    e: [f64; 3],
+) -> i32 {
+    sign(insphere(a, b, c, d, e))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

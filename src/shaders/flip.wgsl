@@ -253,6 +253,13 @@ fn flip_check(
         let va = tet_vertex(tet_a_data, face_a);
         let vb = tet_vertex(tet_b_data, face_b);
 
+        // CRITICAL GUARD: Skip if either apex vertex is infinity
+        // CUDA: KerPredWrapper.h:781-801 - if (vert == _infIdx) return SideOut;
+        let inf_idx = params.y;
+        if (va >= inf_idx) || (vb >= inf_idx) {
+            continue;  // Skip flips involving infinity vertex
+        }
+
         // Get shared face vertices (the 3 vertices of tet_a not including va)
         var face_v: array<u32, 3>;
         var si = 0u;
@@ -262,6 +269,11 @@ fn flip_check(
                 face_v[si] = v;
                 si++;
             }
+        }
+
+        // CRITICAL GUARD: Skip if any shared face vertex is infinity
+        if (face_v[0] >= inf_idx) || (face_v[1] >= inf_idx) || (face_v[2] >= inf_idx) {
+            continue;  // Skip flips involving infinity vertex
         }
 
         let pa = points[va].xyz;

@@ -402,7 +402,8 @@ impl GpuState {
 
     /// Dispatch check delaunay fast (flip voting).
     pub fn dispatch_check_delaunay_fast(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, act_tet_num: u32, vote_offset: u32) {
-        queue.write_buffer(&self.pipelines.check_delaunay_fast_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, 0u32, 0u32]));
+        let inf_idx = self.num_points + 4; // Infinity vertex (after 4 super-tet vertices)
+        queue.write_buffer(&self.pipelines.check_delaunay_fast_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, inf_idx, 0u32]));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("check_delaunay_fast"), timestamp_writes: None });
         pass.set_pipeline(&self.pipelines.check_delaunay_fast_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.check_delaunay_fast_bind_group), &[]);
@@ -411,7 +412,8 @@ impl GpuState {
 
     /// Dispatch check delaunay exact (with DD + SoS predicates).
     pub fn dispatch_check_delaunay_exact(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, act_tet_num: u32, vote_offset: u32) {
-        queue.write_buffer(&self.pipelines.check_delaunay_exact_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, 0u32, 0u32]));
+        let inf_idx = self.num_points + 4; // Infinity vertex (after 4 super-tet vertices)
+        queue.write_buffer(&self.pipelines.check_delaunay_exact_params, 0, bytemuck::cast_slice(&[act_tet_num, vote_offset, inf_idx, 0u32]));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("check_delaunay_exact"), timestamp_writes: None });
         pass.set_pipeline(&self.pipelines.check_delaunay_exact_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.check_delaunay_exact_bind_group), &[]);

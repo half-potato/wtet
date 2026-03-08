@@ -16,7 +16,7 @@
 @group(0) @binding(5) var<storage, read_write> vote_arr: array<i32>;
 @group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(7) var<storage, read> points: array<vec4<f32>>;
-@group(0) @binding(8) var<uniform> params: vec4<u32>; // x = act_tet_num, y = vote_offset
+@group(0) @binding(8) var<uniform> params: vec4<u32>; // x = act_tet_num, y = vote_offset, z = inf_idx
 
 const TET_ALIVE: u32 = 1u;
 const TET_CHANGED: u32 = 2u;
@@ -161,6 +161,7 @@ fn check_delaunay_fast(
     let idx = gid.x;
     let act_tet_num = params.x;
     let vote_offset = params.y;
+    let inf_idx = params.z;
 
     if idx >= act_tet_num {
         return;
@@ -218,8 +219,15 @@ fn check_delaunay_fast(
     for (var bot_vi = 0u; bot_vi < 4u; bot_vi++) {
         let top_vert = opp_vert[bot_vi];
 
+        // CRITICAL GUARD: Skip boundary faces (CUDA: KerPredicates.cu:471)
         if top_vert < 0 {
             continue;
+        }
+
+        // CRITICAL GUARD: Skip infinity vertex - prevents out-of-bounds access
+        // CUDA: KerPredWrapper.h:781-801 - if (vert == _infIdx) return SideOut;
+        if u32(top_vert) >= inf_idx {
+            continue;  // Treat as no violation (SideOut)
         }
 
         // Check for 3-2 flip
@@ -249,6 +257,14 @@ fn check_delaunay_fast(
 
     // Do sphere check
     let bot_tet = tets[bot_ti_u];
+
+    // CRITICAL GUARD: Skip if tet contains infinity vertex
+    // CUDA: KerPredWrapper.h:812-853 - if (tet.has(_infIdx)) use special orient3d handling
+    // For now, skip entirely to prevent out-of-bounds access
+    if (bot_tet.x >= inf_idx) || (bot_tet.y >= inf_idx) || (bot_tet.z >= inf_idx) || (bot_tet.w >= inf_idx) {
+        return;  // Skip tets with infinity (boundary tets)
+    }
+
     let bot_p = array<vec3<f32>, 4>(
         points[bot_tet.x].xyz,
         points[bot_tet.y].xyz,

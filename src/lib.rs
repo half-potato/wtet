@@ -7,6 +7,7 @@ pub mod predicates;
 pub mod gpu;
 pub mod phase1;
 pub mod phase2;
+pub mod cpu;
 
 use types::{DelaunayResult, GDelConfig};
 
