@@ -61,34 +61,37 @@ pub fn force_insert_vertex(
     result.tets.push(t3);
 
     // Set up internal adjacency (4 tets sharing central vertex)
-    // T0 face opposite v1 (face 1) → T1 face opposite vert (face 1)
-    // T0 face opposite v2 (face 2) → T2 face opposite vert (face 2)
-    // T0 face opposite v3 (face 3) → T3 face opposite vert (face 3)
-    // etc.
+    // Shared faces:
+    //   T0-T1: [vert, v2, v3] → T0 face 1 (opp v1), T1 face 0 (opp v0)
+    //   T0-T2: [vert, v1, v3] → T0 face 2 (opp v2), T2 face 0 (opp v0)
+    //   T0-T3: [vert, v1, v2] → T0 face 3 (opp v3), T3 face 0 (opp v0)
+    //   T1-T2: [v0, vert, v3] → T1 face 2 (opp v2), T2 face 1 (opp v1)
+    //   T1-T3: [v0, vert, v2] → T1 face 3 (opp v3), T3 face 1 (opp v1)
+    //   T2-T3: [v0, v1, vert] → T2 face 3 (opp v3), T3 face 2 (opp v2)
 
     let mut adj0 = [INVALID; 4];
     adj0[0] = tet_opp[0]; // External (opposite vert, was opposite v0)
-    adj0[1] = encode_opp(t1_idx as u32, 1); // Internal
-    adj0[2] = encode_opp(t2_idx as u32, 2); // Internal
-    adj0[3] = encode_opp(t3_idx as u32, 3); // Internal
+    adj0[1] = encode_opp(t1_idx as u32, 0); // T1 face 0
+    adj0[2] = encode_opp(t2_idx as u32, 0); // T2 face 0
+    adj0[3] = encode_opp(t3_idx as u32, 0); // T3 face 0
 
     let mut adj1 = [INVALID; 4];
-    adj1[0] = tet_opp[1]; // External (opposite v0, was opposite v1)
-    adj1[1] = encode_opp(t0_idx as u32, 1); // Internal
-    adj1[2] = encode_opp(t2_idx as u32, 0); // Internal
-    adj1[3] = encode_opp(t3_idx as u32, 0); // Internal
+    adj1[0] = encode_opp(t0_idx as u32, 1); // T0 face 1
+    adj1[1] = tet_opp[1]; // External (opposite vert, was opposite v1)
+    adj1[2] = encode_opp(t2_idx as u32, 1); // T2 face 1
+    adj1[3] = encode_opp(t3_idx as u32, 1); // T3 face 1
 
     let mut adj2 = [INVALID; 4];
-    adj2[0] = tet_opp[2]; // External (opposite v1, was opposite v2)
-    adj2[1] = encode_opp(t1_idx as u32, 2); // Internal
-    adj2[2] = encode_opp(t0_idx as u32, 2); // Internal
-    adj2[3] = encode_opp(t3_idx as u32, 1); // Internal
+    adj2[0] = encode_opp(t0_idx as u32, 2); // T0 face 2
+    adj2[1] = encode_opp(t1_idx as u32, 2); // T1 face 2
+    adj2[2] = tet_opp[2]; // External (opposite vert, was opposite v2)
+    adj2[3] = encode_opp(t3_idx as u32, 2); // T3 face 2
 
     let mut adj3 = [INVALID; 4];
-    adj3[0] = tet_opp[3]; // External (opposite v2, was opposite v3)
-    adj3[1] = encode_opp(t2_idx as u32, 3); // Internal
-    adj3[2] = encode_opp(t1_idx as u32, 3); // Internal
-    adj3[3] = encode_opp(t0_idx as u32, 3); // Internal
+    adj3[0] = encode_opp(t0_idx as u32, 3); // T0 face 3
+    adj3[1] = encode_opp(t1_idx as u32, 3); // T1 face 3
+    adj3[2] = encode_opp(t2_idx as u32, 3); // T2 face 3
+    adj3[3] = tet_opp[3]; // External (opposite vert, was opposite v3)
 
     result.adjacency[t0_idx] = adj0;
 

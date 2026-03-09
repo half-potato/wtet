@@ -74,10 +74,10 @@ fn allocate_flip23_slot(
             let array_idx = vert * MEAN_VERTEX_DEGREE + u32(loc_idx);
             free_idx = i32(free_arr[array_idx]);
             break;
+        } else {
+            // Failed to allocate - restore the counter we just decremented
+            atomicAdd(&vert_free_arr[vert], 1);
         }
-
-        // Failed to allocate, reset counter to 0
-        atomicStore(&vert_free_arr[vert], 0);
     }
 
     // Still no free slot? Try infinity vertex block
@@ -89,7 +89,8 @@ fn allocate_flip23_slot(
             let array_idx = inf_idx * MEAN_VERTEX_DEGREE + u32(loc_idx);
             free_idx = i32(free_arr[array_idx]);
         } else {
-            // Gotta expand - allocate beyond current tet_num
+            // Restore counter and allocate beyond current tet_num
+            atomicAdd(&vert_free_arr[inf_idx], 1);
             free_idx = i32(tet_num) - loc_idx - 1;
         }
     }

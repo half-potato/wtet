@@ -155,6 +155,8 @@ pub async fn run(
         // CUDA: expandTetraList( &realInsVertVec, ... ) where realInsVertVec.size() == _insNum
         let mut encoder = device.create_command_encoder(&Default::default());
         state.expand_tetra_list(&mut encoder, queue, num_inserted, &insert_list);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
         println!(
             "[DEBUG] Iteration {}: Inserting {} points (uninserted before removal: {})",

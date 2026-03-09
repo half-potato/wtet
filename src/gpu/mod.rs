@@ -224,31 +224,26 @@ impl GpuState {
             return;
         }
 
-        // Update free_arr for vertices being inserted
-        // Each vertex V gets MEAN_VERTEX_DEGREE tets starting at old_tet_num + (position * MEAN_VERTEX_DEGREE)
-        let mut free_arr_updates: Vec<(usize, u32)> = Vec::new(); // (index, value) pairs
+        // Update free_arr for vertices being inserted via GPU kernel
+        // Port of CUDA kerUpdateVertFreeList (KerDivision.cu:1126-1149)
+        // This reinitializes the free lists to mask the allocation/donation bug (see CUDA_FLAWS.md)
 
+        // Print what we're allocating (for debugging)
         for (idx, &[_tet_idx, position]) in insert_list.iter().enumerate() {
             let vertex_id = self.uninserted[position as usize];
             let tet_base = old_tet_num + (idx as u32 * MEAN_VERTEX_DEGREE);
-            let free_arr_base = (vertex_id * MEAN_VERTEX_DEGREE) as usize;
-
-            // Update vertex's free list with its allocated tets
-            for slot in 0..MEAN_VERTEX_DEGREE {
-                free_arr_updates.push((free_arr_base + slot as usize, tet_base + slot));
-            }
-
             eprintln!("[EXPAND] Vertex {} gets tets [{}-{}]", vertex_id, tet_base, tet_base + MEAN_VERTEX_DEGREE - 1);
         }
 
-        // Write updates to GPU buffer
-        for (index, value) in free_arr_updates {
-            queue.write_buffer(
-                &self.buffers.free_arr,
-                (index * 4) as u64,
-                bytemuck::cast_slice(&[value]),
-            );
-        }
+        // Dispatch GPU kernel to reinitialize free lists
+        eprintln!("[EXPAND] Dispatching update_vert_free_list: {} vertices, start_idx={}", num_new_verts, old_tet_num);
+        self.dispatch_update_vert_free_list(
+            _encoder,
+            queue,
+            num_new_verts,
+            old_tet_num,
+        );
+        eprintln!("[EXPAND] ✓ Free lists reinitialized");
 
         // Update current capacity
         self.current_tet_num = new_tet_num;
@@ -258,5 +253,38 @@ impl GpuState {
         // Note: WGPU uses pre-allocated buffers, so no reordering/shifting needed.
         // CUDA's sorting path (lines 477-556 in GpuDelaunay.cu) is not required for
         // the minimal WGPU design. See STUB_DISPATCH_ANALYSIS.md for details.
+    }
+
+    /// Dispatch kerUpdateVertFreeList - reinitialize free lists for newly inserted vertices
+    /// Port of CUDA kerUpdateVertFreeList (KerDivision.cu:1126-1149)
+    ///
+    /// CRITICAL: This is called EVERY iteration to mask the allocation/donation bug.
+    /// See CUDA_FLAWS.md for details on why this is necessary.
+    fn dispatch_update_vert_free_list(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        num_inserted: u32,
+        start_free_idx: u32,
+    ) {
+        // Update params: [num_inserted, start_free_idx, 0, 0]
+        queue.write_buffer(
+            &self.pipelines.update_vert_free_params,
+            0,
+            bytemuck::cast_slice(&[num_inserted, start_free_idx, 0u32, 0u32]),
+        );
+
+        let mut cpass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("update_vert_free_list"),
+            timestamp_writes: None,
+        });
+
+        cpass.set_pipeline(&self.pipelines.update_vert_free_pipeline);
+        cpass.set_bind_group(0, &self.pipelines.update_vert_free_bind_group, &[]);
+
+        // Dispatch: num_inserted * MEAN_VERTEX_DEGREE threads
+        let num_threads = num_inserted * MEAN_VERTEX_DEGREE;
+        let workgroups = (num_threads + 255) / 256;  // Workgroup size = 256
+        cpass.dispatch_workgroups(workgroups, 1, 1);
     }
 }

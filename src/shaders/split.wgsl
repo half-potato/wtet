@@ -84,22 +84,27 @@ fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
 }
 
 // Get 4 free tet slots
-// CRITICAL: Must match CUDA's pre-allocated approach (KerDivision.cu:120-124)
-// CUDA allocates 4 CONSECUTIVE pre-reserved slots from the END of the vertex's block
+// CRITICAL FIX: Atomically reserve slots BEFORE reading to prevent race condition
+// Race condition: If multiple threads split the same vertex simultaneously,
+// they would read the same positions from free_arr before atomicSub, getting
+// duplicate tet indices → corruption/degenerate tets!
 fn get_free_slots_4tet(vertex: u32) -> vec4<u32> {
-    // CUDA line 120: const int newIdx = ( splitVertex + 1 ) * MeanVertDegree - 1;
-    let base_idx = (vertex + 1u) * MEAN_VERTEX_DEGREE - 1u;
+    // Atomically reserve 4 slots FIRST (returns old count BEFORE subtraction)
+    let old_count = atomicSub(&vert_free_arr[vertex], 4u);
 
-    // CUDA line 121: const int newTetIdx[4] = { freeArr[newIdx], freeArr[newIdx-1], freeArr[newIdx-2], freeArr[newIdx-3] };
+    // Calculate base index from the RESERVED position
+    // old_count is the number of free slots before our reservation
+    // We take slots at positions [old_count-1, old_count-2, old_count-3, old_count-4]
+    let base = vertex * MEAN_VERTEX_DEGREE;
+    let base_idx = base + old_count - 1u;
+
+    // Read from the reserved positions (now safe - no other thread can get these)
     let slots = vec4<u32>(
         free_arr[base_idx],
         free_arr[base_idx - 1u],
         free_arr[base_idx - 2u],
         free_arr[base_idx - 3u]
     );
-
-    // CUDA line 124: vertFreeArr[ splitVertex ] -= 4;
-    atomicSub(&vert_free_arr[vertex], 4u);
 
     return slots;
 }
@@ -143,31 +148,13 @@ fn split_tetra(
     let v2 = orig.z;
     let v3 = orig.w;
 
-    // VALIDATION: Check for degenerate input tet
-    // A tet is degenerate if it has repeated vertices (zero volume)
-    if (v0 == v1) || (v0 == v2) || (v0 == v3) || (v1 == v2) || (v1 == v3) || (v2 == v3) {
-        // ERROR: Cannot split degenerate tet!
-        // Mark as failed and return
-        if idx == 0u {
-            tet_info[8] = 0xBAD1u;  // Degenerate input marker
-        }
-        breadcrumb(tid, 0xBAD1u);
-        return;
-    }
+    // NOTE: Removed degenerate tet check - CUDA has no such validation
+    // If degenerate tets exist, they indicate bugs elsewhere in the pipeline
 
     // Get the actual vertex ID (p is position in uninserted array, not vertex ID!)
     let vertex = uninserted[p];
 
-    // VALIDATION: Check that new vertex is distinct from tet vertices
-    // (Shouldn't happen in correct Delaunay, but defensive check)
-    if (vertex == v0) || (vertex == v1) || (vertex == v2) || (vertex == v3) {
-        // ERROR: Vertex already in tet!
-        if idx == 0u {
-            tet_info[8] = 0xBAD2u;  // Duplicate vertex marker
-        }
-        breadcrumb(tid, 0xBAD2u);
-        return;
-    }
+    // NOTE: Removed duplicate vertex check - CUDA has no such validation
 
     // Allocate 4 new tet slots from vertex's pre-reserved block
     // Uses CUDA's simple approach: read 4 consecutive slots from end of block
@@ -191,15 +178,8 @@ fn split_tetra(
     breadcrumb(tid, CRUMB_AFTER_ALLOC);
     debug_slot(tid, 1u, new_slots);
 
-    // Check allocation succeeded
-    if t0 == INVALID {
-        // DIAGNOSTIC: Mark allocation failure
-        if idx == 0u {
-            tet_info[7] = 0xDEADu;
-        }
-        breadcrumb(tid, 0xDEADu);  // Allocation failed marker
-        return;
-    }
+    // NOTE: Removed allocation failure check - CUDA has no such validation
+    // Pre-allocation should ensure enough slots are always available
 
     // DIAGNOSTIC: Mark allocation success
     if idx == 0u {
@@ -335,13 +315,9 @@ fn split_tetra(
     tet_to_vert[t3] = INVALID;
 
     // ═══════════════════════════════════════════════════════════════════════════
-    // Donate old tet back to its owner's free list (MOVED TO END)
+    // Donate old tet back to its owner's free list
     // ═══════════════════════════════════════════════════════════════════════════
-    // CRITICAL FIX: Mark old tet as dead AFTER all new tets are fully written,
-    // marked alive, and external adjacency is set. This prevents race conditions
-    // where neighbors see the old tet as dead while trying to update adjacency.
-    //
-    // DONATION LOGIC - Port of CUDA KerDivision.cu:181-188
+    // Port of CUDA KerDivision.cu:181-188 (AFTER all new tets are created)
     //
     // CUDA:
     //   const int blkIdx  = tetIdx / MeanVertDegree;
@@ -350,22 +326,11 @@ fn split_tetra(
     //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
     //   setTetAliveState( tetInfoArr[ tetIdx ], false );
     //
-    // Issue #3 Fix: Use pre-computed block_owner lookup (matches CUDA's array lookup)
-    //
-    // Calculate which block this tet belongs to
     let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
-
-    // Lookup owner from pre-computed buffer (replaces CUDA's insVertVec._arr[blkIdx])
     let owner_vertex = block_owner[blk_idx];
-
-    // Atomically increment this vertex's free count and get the slot index
     let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
-
-    // Store old_tet in the owner's free list
     free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot_idx] = old_tet;
-
-    // Mark old tet as dead (now safe to do after all adjacency updates)
-    tet_info[old_tet] = 0u;
+    tet_info[old_tet] = 0u;  // Mark as dead
     // ═══════════════════════════════════════════════════════════════════════════
 
     breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);

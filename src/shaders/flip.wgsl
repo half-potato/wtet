@@ -25,6 +25,7 @@
 @group(0) @binding(8) var<storage, read_write> flip_queue_next: array<u32>;
 @group(0) @binding(9) var<storage, read_write> flip_count: array<atomic<u32>>; // [0] = next queue size
 @group(0) @binding(10) var<uniform> params: vec4<u32>; // x = queue_size, y = inf_idx
+@group(0) @binding(11) var<storage, read> block_owner: array<u32>; // Pre-computed block ownership
 
 const INVALID: u32 = 0xFFFFFFFFu;
 const TET_ALIVE: u32 = 1u;
@@ -186,21 +187,70 @@ fn find_local(tet: vec4<u32>, v: u32) -> u32 {
     return 4u;
 }
 
-// Donate tet to infinity free list (for 3-2 flips)
+// Donate tet to vertex owner's free list (for 3-2 flips)
 // CUDA: KerDivision.cu:495-500
-// Simplified: donate to inf_idx (params.y) instead of calculating ownership
+// Calculate block ownership and donate to that vertex's pool (or inf_idx if beyond inserted vertices)
 fn donate_tet(tet_idx: u32) {
-    let inf_idx = params.y;
-    let free_slot = atomicAdd(&vert_free_arr[inf_idx], 1u);
-    free_arr[inf_idx * MEAN_VERTEX_DEGREE + free_slot] = tet_idx;
+    // Calculate which block this tet belongs to (CUDA line 496)
+    let blk_idx = tet_idx / MEAN_VERTEX_DEGREE;
+
+    // Get the owner vertex (CUDA line 497: uses insVertVec._arr[insIdx] or infIdx)
+    // block_owner already does this mapping: maps block index to vertex owner
+    let owner_vertex = block_owner[blk_idx];
+
+    // Atomically allocate slot in owner's free list (CUDA line 498)
+    let free_slot = atomicAdd(&vert_free_arr[owner_vertex], 1u);
+
+    // Store donated tet in owner's free list (CUDA line 500)
+    free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot] = tet_idx;
+
     // Mark tet as dead
     atomicAnd(&tet_info[tet_idx], ~TET_ALIVE);
 }
 
-// Pop 1 free slot from the free stack.
-fn pop_free_slot() -> u32 {
-    let old_free = atomicSub(&counters[COUNTER_FREE], 1u);
-    return free_arr[old_free - 1u];
+// Allocate slot for 2-3 flip using per-vertex free lists (CUDA: kerAllocateFlip23Slot, lines 888-953)
+// Tries vertices of bottom tet first, then falls back to inf_idx pool.
+fn allocate_flip23_slot(bot_tet: vec4<u32>) -> u32 {
+    let inf_idx = params.y;
+
+    // Try to allocate from vertices of the bottom tet (CUDA lines 917-935)
+    for (var vi = 0u; vi < 4u; vi++) {
+        let vert = tet_vertex(bot_tet, vi);
+
+        if vert >= inf_idx {
+            continue;  // Skip infinity vertices
+        }
+
+        // Check if this vertex has free slots
+        let vert_free_count = atomicLoad(&vert_free_arr[vert]);
+        if vert_free_count > 0u {
+            // Try to claim a slot (CUDA line 926)
+            let loc_idx = atomicSub(&vert_free_arr[vert], 1u) - 1u;
+
+            if loc_idx >= 0u {
+                // Successfully claimed slot (CUDA line 930)
+                let free_idx = free_arr[vert * MEAN_VERTEX_DEGREE + loc_idx];
+                return free_idx;
+            } else {
+                // Race condition - another thread took the last slot
+                // Reset to 0 to prevent underflow (CUDA line 933)
+                atomicStore(&vert_free_arr[vert], 0u);
+            }
+        }
+    }
+
+    // Fall back to inf_idx pool (CUDA lines 938-945)
+    let loc_idx = atomicSub(&vert_free_arr[inf_idx], 1u) - 1u;
+
+    if loc_idx >= 0u {
+        let free_idx = free_arr[inf_idx * MEAN_VERTEX_DEGREE + loc_idx];
+        return free_idx;
+    } else {
+        // Out of space - would need expansion (CUDA line 946)
+        // This shouldn't happen if buffers are properly sized
+        // Return INVALID to signal failure
+        return INVALID;
+    }
 }
 
 // Check and perform 2-3 flips for tets in the flip queue.
@@ -498,8 +548,15 @@ fn flip_check(
         //   C1 = (va, vb, face_v[1], face_v[2])  at tet_b
         //   C2 = (va, vb, face_v[2], face_v[0])  at new_slot
 
-        // Pop 1 free slot (2 tets → 3 tets = net +1)
-        let new_slot = pop_free_slot();
+        // Allocate 1 slot from per-vertex free lists (2 tets → 3 tets = net +1)
+        // CUDA: kerAllocateFlip23Slot (lines 888-953)
+        let new_slot = allocate_flip23_slot(tet_a_data);
+
+        if new_slot == INVALID {
+            // Allocation failed - buffer is full
+            // Skip this flip and continue
+            return;
+        }
 
         // Construct new tets and orient them positively
         var c0 = vec4<u32>(va, vb, face_v[0], face_v[1]);

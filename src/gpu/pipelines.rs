@@ -352,7 +352,8 @@ impl Pipelines {
                 storage_ro_entry(0),  // insert_list
                 storage_rw_entry(1),  // vert_free_arr
                 storage_rw_entry(2),  // free_arr
-                uniform_entry(3),     // params (x = num_insertions, y = start_free_idx)
+                storage_ro_entry(3),  // uninserted
+                uniform_entry(4),     // params (x = num_insertions, y = start_free_idx)
             ],
         });
 
@@ -363,7 +364,8 @@ impl Pipelines {
                 buf_entry(0, &bufs.insert_list),
                 buf_entry(1, &bufs.vert_free_arr),
                 buf_entry(2, &bufs.free_arr),
-                buf_entry(3, &update_vert_free_params),
+                buf_entry(3, &bufs.uninserted),
+                buf_entry(4, &update_vert_free_params),
             ],
         });
 
@@ -585,6 +587,7 @@ impl Pipelines {
                 storage_rw_entry(8),  // flip_queue_next
                 storage_rw_entry(9),  // flip_count
                 uniform_entry(10),    // params
+                storage_ro_entry(11), // block_owner
             ],
         });
 
@@ -603,6 +606,7 @@ impl Pipelines {
                 buf_entry(8, &bufs.flip_queue_next),
                 buf_entry(9, &bufs.flip_count),
                 buf_entry(10, &flip_params),
+                buf_entry(11, &bufs.block_owner),
             ],
         });
 
@@ -622,6 +626,7 @@ impl Pipelines {
                 buf_entry(8, &bufs.flip_queue),        // swapped: write to original
                 buf_entry(9, &bufs.flip_count),
                 buf_entry(10, &flip_params),
+                buf_entry(11, &bufs.block_owner),
             ],
         });
 

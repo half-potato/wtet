@@ -24,15 +24,14 @@
 // └────────────────────────────────────────────────────────────────────────┘
 // Check if a position exists in insert_list (linear search - small list)
 fn is_inserted(idx: u32, num_inserted: u32) -> bool {
-    // Unroll loop to avoid any potential WGSL optimization issues
-    if num_inserted >= 1u && insert_list[0].y == idx { return true; }
-    if num_inserted >= 2u && insert_list[1].y == idx { return true; }
-    if num_inserted >= 3u && insert_list[2].y == idx { return true; }
-    if num_inserted >= 4u && insert_list[3].y == idx { return true; }
-    if num_inserted >= 5u && insert_list[4].y == idx { return true; }
-    if num_inserted >= 6u && insert_list[5].y == idx { return true; }
-    if num_inserted >= 7u && insert_list[6].y == idx { return true; }
-    if num_inserted >= 8u && insert_list[7].y == idx { return true; }
+    // CRITICAL FIX: Must check ALL num_inserted positions, not just first 8!
+    // Previous bug: Only checked [0..7], causing positions 8+ to be missed.
+    // Result: Vertices inserted multiple times → degenerate tets!
+    for (var i = 0u; i < num_inserted; i++) {
+        if insert_list[i].y == idx {
+            return true;
+        }
+    }
     return false;
 }
 

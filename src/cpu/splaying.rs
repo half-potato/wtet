@@ -45,12 +45,9 @@ pub fn fix_with_star_splaying(points: &[[f32; 3]], result: &mut DelaunayResult) 
               points.len(), result.tets.len(), result.failed_verts.len());
 
     // Force-insert failed vertices so star splaying can fix them
-    // NOTE: Disabled for now - need to test with real triangulations first
-    if false {
-        eprintln!("\n[SPLAY] PHASE 0: Force-Insert Failed Vertices");
-        crate::cpu::force_insert::force_insert_failed_vertices(result);
-        eprintln!("[SPLAY] After force-insert: {} tets", result.tets.len());
-    }
+    eprintln!("\n[SPLAY] PHASE 0: Force-Insert Failed Vertices");
+    crate::cpu::force_insert::force_insert_failed_vertices(result);
+    eprintln!("[SPLAY] After force-insert: {} tets", result.tets.len());
 
     let mut ctx = SplayingContext::new(points, result);
 
@@ -213,13 +210,18 @@ impl SplayingContext {
     /// Create star from tetrahedra containing a vertex.
     ///
     /// Ported from Splaying.cpp lines 201-215 (createFromTetra)
-    pub fn create_from_tetra(&mut self, vert: u32, result: &DelaunayResult) -> Star {
-        // Find a tet containing vert (simplified: use first tet for now)
-        let start_tet = result
-            .tets
-            .iter()
-            .position(|tet| tet.contains(&vert))
-            .expect("No tet contains vertex");
+    pub fn create_from_tetra(&mut self, vert: u32, result: &DelaunayResult) -> Option<Star> {
+        // Find a tet containing vert
+        let start_tet = match result.tets.iter().position(|tet| tet.contains(&vert)) {
+            Some(idx) => idx,
+            None => {
+                eprintln!(
+                    "[SPLAY] WARNING: No tet contains vertex {} - skipping",
+                    vert
+                );
+                return None;
+            }
+        };
 
         let mut star = self.tet_visit_create_star(start_tet, vert, result);
 
@@ -227,7 +229,7 @@ impl SplayingContext {
 
         self.visit_id += 1;
 
-        star
+        Some(star)
     }
 
     /// Create stars for all failed vertices and perform initial flipping.
@@ -241,7 +243,13 @@ impl SplayingContext {
         for &failed_vert in &result.failed_verts.clone() {
             eprintln!("[SPLAY] --- Extracting star for vertex {} ---", failed_vert);
 
-            let mut star = self.create_from_tetra(failed_vert, result);
+            let mut star = match self.create_from_tetra(failed_vert, result) {
+                Some(s) => s,
+                None => {
+                    eprintln!("[SPLAY]   Skipping vertex {} (not in triangulation)", failed_vert);
+                    continue;
+                }
+            };
 
             eprintln!(
                 "[SPLAY]   Star {}: {} triangles in link",
@@ -303,9 +311,12 @@ impl SplayingContext {
             if facet.from_idx == u32::MAX {
                 // Create star if doesn't exist
                 if !star_map.contains_key(&from_vert) {
-                    let new_star = self.create_from_tetra(from_vert, result);
-                    star_map.insert(from_vert, self.stars.len());
-                    self.stars.push(new_star);
+                    if let Some(new_star) = self.create_from_tetra(from_vert, result) {
+                        star_map.insert(from_vert, self.stars.len());
+                        self.stars.push(new_star);
+                    } else {
+                        continue;
+                    }
                 }
 
                 let from_idx = *star_map.get(&from_vert).unwrap();
@@ -359,9 +370,12 @@ impl SplayingContext {
 
             // Create to-star if needed
             if !star_map.contains_key(&to_vert) {
-                let new_star = self.create_from_tetra(to_vert, result);
-                star_map.insert(to_vert, self.stars.len());
-                self.stars.push(new_star);
+                if let Some(new_star) = self.create_from_tetra(to_vert, result) {
+                    star_map.insert(to_vert, self.stars.len());
+                    self.stars.push(new_star);
+                } else {
+                    continue;
+                }
             }
 
             let to_idx = *star_map.get(&to_vert).unwrap();
