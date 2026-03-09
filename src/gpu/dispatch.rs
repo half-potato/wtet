@@ -527,6 +527,126 @@ impl GpuState {
     /// - All alive tets are moved to indices 0..new_tet_num-1
     /// - All dead tets are removed
     /// - Adjacency is updated to use new compacted indices
+    /// GPU-accelerated inclusive prefix sum for TET_ALIVE flags.
+    ///
+    /// Performs transform_inclusive_scan equivalent to CUDA:
+    ///   1. Transform: tet_info → binary 0/1 (TET_ALIVE bit)
+    ///   2. Reduce-Then-Scan: 3-pass GPU prefix sum
+    ///   3. Returns new_tet_num from last element
+    ///
+    /// Leaves result in buffers.prefix_sum_data for downstream shaders.
+    pub async fn dispatch_gpu_prefix_sum(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        total_tet_num: u32,
+    ) -> u32 {
+        log::info!("[GPU_PREFIX_SUM] Starting for {} tets", total_tet_num);
+
+        let vec_size = (total_tet_num + 3) / 4;  // Round up for vec4 packing
+        let thread_blocks = (vec_size + 1023) / 1024;  // VEC_PART_SIZE = 1024 vec4
+
+        // Update prefix_sum_info uniform
+        queue.write_buffer(
+            &self.pipelines.transform_params,
+            0,
+            bytemuck::cast_slice(&[total_tet_num, 0, 0, 0]),
+        );
+        queue.write_buffer(
+            &self.buffers.prefix_sum_info,
+            0,
+            bytemuck::cast_slice(&[total_tet_num, vec_size, thread_blocks, 0]),
+        );
+        queue.write_buffer(
+            &self.pipelines.unpack_params,
+            0,
+            bytemuck::cast_slice(&[total_tet_num, 0, 0, 0]),
+        );
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gpu_prefix_sum"),
+        });
+
+        // Pass 1: Transform tet_info to binary vec4
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("transform_tet_alive"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.transform_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.transform_bind_group), &[]);
+            pass.dispatch_workgroups((vec_size + 255) / 256, 1, 1);
+        }
+
+        // Pass 2: Reduce
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.reduce_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.reduce_bind_group), &[]);
+            pass.dispatch_workgroups(thread_blocks, 1, 1);
+        }
+
+        // Pass 3: Spine Scan (single workgroup)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("spine_scan"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.spine_scan_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.spine_scan_bind_group), &[]);
+            pass.dispatch_workgroups(1, 1, 1);  // Single workgroup!
+        }
+
+        // Pass 4: Downsweep
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("downsweep"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.downsweep_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.downsweep_bind_group), &[]);
+            pass.dispatch_workgroups(thread_blocks, 1, 1);
+        }
+
+        // Pass 5: Unpack vec4 to u32
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("unpack_vec4_to_u32"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.unpack_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.unpack_bind_group), &[]);
+            pass.dispatch_workgroups((vec_size + 255) / 256, 1, 1);
+        }
+
+        // Submit all passes
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait {
+            submission_index: None,
+            timeout: None,
+        });
+
+        // Readback ONLY the last element to get new_tet_num
+        let last_idx = total_tet_num - 1;
+        let offset = (last_idx as u64) * 4;
+        let result: Vec<u32> = self.buffers.read_buffer_range_as(
+            device,
+            queue,
+            &self.buffers.prefix_sum_data,
+            offset,
+            1,  // Read only 1 u32
+        ).await;
+
+        let new_tet_num = result[0];
+        log::info!("[GPU_PREFIX_SUM] Complete: {} alive tets ({:.1}%)",
+                   new_tet_num, 100.0 * new_tet_num as f32 / total_tet_num as f32);
+
+        new_tet_num
+    }
+
     /// - The tetInfoVec can be set to all TET_ALIVE (all tets in range are alive)
     pub async fn compact_tetras(
         &self,
@@ -534,58 +654,12 @@ impl GpuState {
         queue: &wgpu::Queue,
         total_tet_num: u32,
     ) -> u32 {
-        use crate::types::TET_ALIVE;
-
         log::info!("[COMPACT] Starting tet compaction for {} tets", total_tet_num);
 
-        // Count alive tets and build prefix sum (CUDA does transform_inclusive_scan)
-        let tet_info: Vec<u32> = self.buffers.read_buffer_as(
-            device,
-            queue,
-            &self.buffers.tet_info,
-            total_tet_num as usize
-        ).await;
-
-        // Build prefix sum: prefix[i] = count of alive tets in [0..=i]
-        let mut prefix_sum: Vec<u32> = Vec::with_capacity(total_tet_num as usize);
-        let mut count = 0u32;
-        for &flags in &tet_info {
-            if (flags & TET_ALIVE) != 0 {
-                count += 1;
-            }
-            prefix_sum.push(count);
-        }
-
-        let new_tet_num = count;
-
-        // Debug: Check prefix sum consistency
-        let alive_count = tet_info.iter().filter(|&&f| (f & TET_ALIVE) != 0).count();
-        if alive_count != new_tet_num as usize {
-            log::error!("[COMPACT] ERROR: Prefix sum mismatch! alive_count={}, new_tet_num={}",
-                       alive_count, new_tet_num);
-        }
-
-        // Debug: Detailed alive/dead distribution
-        let dead_in_stable = tet_info.iter().take(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) == 0).count();
-        let alive_in_compaction = tet_info.iter().skip(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) != 0).count();
-        let dead_in_compaction = tet_info.iter().skip(new_tet_num as usize).filter(|&&f| (f & TET_ALIVE) == 0).count();
-
-        eprintln!("[COMPACT_DEBUG] Total: {} tets, Alive: {} ({:.1}%)",
-                  total_tet_num, new_tet_num, 100.0 * new_tet_num as f32 / total_tet_num as f32);
-        eprintln!("[COMPACT_DEBUG] Stable region [0..{}): {} dead slots need filling",
-                  new_tet_num, dead_in_stable);
-        eprintln!("[COMPACT_DEBUG] Compaction region [{}..{}): {} alive to move, {} dead to discard",
-                  new_tet_num, total_tet_num, alive_in_compaction, dead_in_compaction);
-
-        if dead_in_stable != alive_in_compaction {
-            eprintln!("[COMPACT_DEBUG] WARNING: Mismatch! {} dead slots but {} tets to move",
-                     dead_in_stable, alive_in_compaction);
-        }
+        // GPU prefix sum: transform_inclusive_scan on TET_ALIVE flags
+        let new_tet_num = self.dispatch_gpu_prefix_sum(device, queue, total_tet_num).await;
 
         log::info!("[COMPACT] Active tets: {} / {}", new_tet_num, total_tet_num);
-
-        // Upload prefix sum to GPU
-        queue.write_buffer(&self.buffers.prefix_sum_data, 0, bytemuck::cast_slice(&prefix_sum));
 
         if new_tet_num == total_tet_num {
             log::info!("[COMPACT] No dead tets, skipping compaction");
@@ -611,28 +685,15 @@ impl GpuState {
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-        // Debug: Read back free_arr and prefix_sum to verify correctness
+        // Debug: Read back prefix_sum to verify correctness
         if total_tet_num <= 500 {  // Only for small meshes to avoid spam
-            let free_arr_data: Vec<u32> = self.buffers.read_buffer_as(
-                device, queue, &self.buffers.free_arr, dead_in_stable.min(100)
-            ).await;
             let prefix_sample: Vec<u32> = self.buffers.read_buffer_as(
                 device, queue, &self.buffers.prefix_sum_data,
-                ((new_tet_num as usize).min(10) + (total_tet_num as usize - new_tet_num as usize).min(10))
+                (new_tet_num as usize).min(10) + (total_tet_num as usize - new_tet_num as usize).min(10)
             ).await;
 
-            eprintln!("[COMPACT_DEBUG] Free slots (first {}): {:?}",
-                     free_arr_data.len().min(20), &free_arr_data[..free_arr_data.len().min(20)]);
             eprintln!("[COMPACT_DEBUG] Prefix (first 10): {:?}",
                      &prefix_sample[..prefix_sample.len().min(10)]);
-
-            // Check for duplicate free slots
-            use std::collections::HashSet;
-            let unique_free: HashSet<u32> = free_arr_data.iter().copied().collect();
-            if unique_free.len() != free_arr_data.len() {
-                eprintln!("[COMPACT_DEBUG] ERROR: {} duplicate free slots! ({} unique vs {} total)",
-                         free_arr_data.len() - unique_free.len(), unique_free.len(), free_arr_data.len());
-            }
         }
 
         log::info!("[COMPACT] ✓ Compaction complete, {} alive tets", new_tet_num);

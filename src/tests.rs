@@ -178,7 +178,7 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("test"),
-            required_features: wgpu::Features::empty(),
+            required_features: wgpu::Features::SUBGROUP,  // Required for prefix_sum.wgsl
             required_limits: limits,
             memory_hints: Default::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),
@@ -2285,7 +2285,7 @@ fn test_update_opp_shader_compiles() {
     let (device, _queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("test"),
-            required_features: wgpu::Features::empty(),
+            required_features: wgpu::Features::SUBGROUP,  // Required for prefix_sum.wgsl
             required_limits: wgpu::Limits::default(),
             memory_hints: Default::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),

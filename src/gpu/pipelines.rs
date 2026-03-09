@@ -125,6 +125,24 @@ pub struct Pipelines {
     pub mark_rejected_flips_pipeline: wgpu::ComputePipeline,
     pub mark_rejected_flips_bind_group: wgpu::BindGroup,
     pub mark_rejected_flips_params: wgpu::Buffer,
+
+    // --- GPU Prefix Sum Pipelines ---
+    pub transform_pipeline: wgpu::ComputePipeline,
+    pub transform_bind_group: wgpu::BindGroup,
+    pub transform_params: wgpu::Buffer,
+
+    pub reduce_pipeline: wgpu::ComputePipeline,
+    pub reduce_bind_group: wgpu::BindGroup,
+
+    pub spine_scan_pipeline: wgpu::ComputePipeline,
+    pub spine_scan_bind_group: wgpu::BindGroup,
+
+    pub downsweep_pipeline: wgpu::ComputePipeline,
+    pub downsweep_bind_group: wgpu::BindGroup,
+
+    pub unpack_pipeline: wgpu::ComputePipeline,
+    pub unpack_bind_group: wgpu::BindGroup,
+    pub unpack_params: wgpu::Buffer,
 }
 
 impl Pipelines {
@@ -1296,6 +1314,221 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- GPU Prefix Sum Pipelines ---
+
+        // Load shaders
+        let transform_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("transform_tet_alive.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/transform_tet_alive.wgsl").into()),
+        });
+
+        let prefix_sum_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("prefix_sum.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/prefix_sum.wgsl").into()),
+        });
+
+        let unpack_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("unpack_vec4_to_u32.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/unpack_vec4_to_u32.wgsl").into()),
+        });
+
+        // Params buffers
+        let transform_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let unpack_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        // 1. Transform pipeline
+        let transform_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("transform_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // tet_info
+                storage_rw_entry(1),  // scan_in
+                uniform_entry(2),     // params
+            ],
+        });
+
+        let transform_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("transform_pl"),
+            bind_group_layouts: &[&transform_bgl],
+            immediate_size: 0,
+        });
+
+        let transform_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("transform_tet_alive"),
+            layout: Some(&transform_pl),
+            module: &transform_shader,
+            entry_point: Some("transform_tet_alive"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let transform_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("transform_bg"),
+            layout: &transform_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_info),
+                buf_entry(1, &bufs.scan_in),
+                buf_entry(2, &transform_params),
+            ],
+        });
+
+        // 2. Reduce pipeline (prefix_sum.wgsl::reduce)
+        let reduce_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("reduce_bgl"),
+            entries: &[
+                uniform_entry(0),     // info
+                storage_rw_entry(1),  // scan_in
+                storage_rw_entry(2),  // scan_out (unused in reduce)
+                storage_rw_entry(3),  // scan_bump
+                storage_rw_entry(4),  // reduction
+                storage_rw_entry(5),  // misc
+            ],
+        });
+
+        let reduce_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("reduce_pl"),
+            bind_group_layouts: &[&reduce_bgl],
+            immediate_size: 0,
+        });
+
+        let reduce_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("reduce"),
+            layout: Some(&reduce_pl),
+            module: &prefix_sum_shader,
+            entry_point: Some("reduce"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let reduce_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("reduce_bg"),
+            layout: &reduce_bgl,
+            entries: &[
+                buf_entry(0, &bufs.prefix_sum_info),
+                buf_entry(1, &bufs.scan_in),
+                buf_entry(2, &bufs.scan_out),
+                buf_entry(3, &bufs.prefix_sum_bump),
+                buf_entry(4, &bufs.reduction),
+                buf_entry(5, &bufs.prefix_sum_misc),
+            ],
+        });
+
+        // 3. Spine Scan pipeline (prefix_sum.wgsl::spine_scan)
+        let spine_scan_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("spine_scan_bgl"),
+            entries: &[
+                uniform_entry(0),     // info
+                storage_rw_entry(1),  // scan_in (unused in spine)
+                storage_rw_entry(2),  // scan_out (unused in spine)
+                storage_rw_entry(3),  // scan_bump
+                storage_rw_entry(4),  // reduction
+                storage_rw_entry(5),  // misc
+            ],
+        });
+
+        let spine_scan_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("spine_scan_pl"),
+            bind_group_layouts: &[&spine_scan_bgl],
+            immediate_size: 0,
+        });
+
+        let spine_scan_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("spine_scan"),
+            layout: Some(&spine_scan_pl),
+            module: &prefix_sum_shader,
+            entry_point: Some("spine_scan"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let spine_scan_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("spine_scan_bg"),
+            layout: &spine_scan_bgl,
+            entries: &[
+                buf_entry(0, &bufs.prefix_sum_info),
+                buf_entry(1, &bufs.scan_in),
+                buf_entry(2, &bufs.scan_out),
+                buf_entry(3, &bufs.prefix_sum_bump),
+                buf_entry(4, &bufs.reduction),
+                buf_entry(5, &bufs.prefix_sum_misc),
+            ],
+        });
+
+        // 4. Downsweep pipeline (prefix_sum.wgsl::downsweep)
+        let downsweep_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("downsweep_bgl"),
+            entries: &[
+                uniform_entry(0),     // info
+                storage_rw_entry(1),  // scan_in
+                storage_rw_entry(2),  // scan_out
+                storage_rw_entry(3),  // scan_bump
+                storage_rw_entry(4),  // reduction
+                storage_rw_entry(5),  // misc
+            ],
+        });
+
+        let downsweep_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("downsweep_pl"),
+            bind_group_layouts: &[&downsweep_bgl],
+            immediate_size: 0,
+        });
+
+        let downsweep_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("downsweep"),
+            layout: Some(&downsweep_pl),
+            module: &prefix_sum_shader,
+            entry_point: Some("downsweep"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let downsweep_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("downsweep_bg"),
+            layout: &downsweep_bgl,
+            entries: &[
+                buf_entry(0, &bufs.prefix_sum_info),
+                buf_entry(1, &bufs.scan_in),
+                buf_entry(2, &bufs.scan_out),
+                buf_entry(3, &bufs.prefix_sum_bump),
+                buf_entry(4, &bufs.reduction),
+                buf_entry(5, &bufs.prefix_sum_misc),
+            ],
+        });
+
+        // 5. Unpack pipeline
+        let unpack_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("unpack_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // scan_out
+                storage_rw_entry(1),  // prefix_sum_data
+                uniform_entry(2),     // params
+            ],
+        });
+
+        let unpack_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("unpack_pl"),
+            bind_group_layouts: &[&unpack_bgl],
+            immediate_size: 0,
+        });
+
+        let unpack_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("unpack_vec4_to_u32"),
+            layout: Some(&unpack_pl),
+            module: &unpack_shader,
+            entry_point: Some("unpack_vec4_to_u32"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let unpack_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("unpack_bg"),
+            layout: &unpack_bgl,
+            entries: &[
+                buf_entry(0, &bufs.scan_out),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &unpack_params),
+            ],
+        });
+
 
         Self {
             init_pipeline,
@@ -1371,6 +1604,18 @@ impl Pipelines {
             mark_rejected_flips_pipeline,
             mark_rejected_flips_bind_group,
             mark_rejected_flips_params,
+            transform_pipeline,
+            transform_bind_group,
+            transform_params,
+            reduce_pipeline,
+            reduce_bind_group,
+            spine_scan_pipeline,
+            spine_scan_bind_group,
+            downsweep_pipeline,
+            downsweep_bind_group,
+            unpack_pipeline,
+            unpack_bind_group,
+            unpack_params,
         }
     }
 }

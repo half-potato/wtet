@@ -92,6 +92,20 @@ pub struct GpuBuffers {
     /// Maps block index to owning vertex (pre-computed at initialization)
     pub block_owner: wgpu::Buffer,
 
+    // --- GPU Prefix Sum Buffers ---
+    /// Prefix sum input (vec4-packed): vec4<u32> × (max_tets / 4)
+    pub scan_in: wgpu::Buffer,
+    /// Prefix sum output (vec4-packed): vec4<u32> × (max_tets / 4)
+    pub scan_out: wgpu::Buffer,
+    /// Reduction buffer (block sums): u32 × num_blocks
+    pub reduction: wgpu::Buffer,
+    /// Prefix sum info uniform: vec4<u32>
+    pub prefix_sum_info: wgpu::Buffer,
+    /// Prefix sum bump counter: u32
+    pub prefix_sum_bump: wgpu::Buffer,
+    /// Prefix sum misc scratch: u32 × 64
+    pub prefix_sum_misc: wgpu::Buffer,
+
     pub num_points: u32,
     pub max_tets: u32,
 }
@@ -320,6 +334,49 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        // GPU prefix sum intermediate buffers
+        let vec_size = (max_tets + 3) / 4;  // Round up for vec4 packing
+        let scan_in = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scan_in"),
+            size: (vec_size as u64) * 16,  // vec4<u32> = 16 bytes
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let scan_out = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("scan_out"),
+            size: (vec_size as u64) * 16,
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let ps_num_blocks = (vec_size + 1023) / 1024;  // VEC_PART_SIZE = 1024
+        let reduction = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("reduction"),
+            size: (ps_num_blocks as u64) * 4,  // u32 per block
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let prefix_sum_info = Self::create_params_buffer(
+            device,
+            [0, vec_size, 0, 0]  // Will be updated per dispatch
+        );
+
+        let prefix_sum_bump = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("prefix_sum_bump"),
+            size: 4,  // Single u32 for scan_bump
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let prefix_sum_misc = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("prefix_sum_misc"),
+            size: 256,  // Misc buffer for prefix sum scratch space
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
         // Staging buffer: large enough for the biggest readback we'll do
         let max_readback = (max_tets as u64) * 16; // tets are the biggest
         let staging = device.create_buffer(&wgpu::BufferDescriptor {
@@ -506,6 +563,12 @@ impl GpuBuffers {
             thread_debug,
             update_debug,
             block_owner,
+            scan_in,
+            scan_out,
+            reduction,
+            prefix_sum_info,
+            prefix_sum_bump,
+            prefix_sum_misc,
             num_points,
             max_tets,
         }
@@ -617,6 +680,52 @@ impl GpuBuffers {
         let result: Vec<T> = bytemuck::cast_slice(&data[..size as usize]).to_vec();
         drop(data);
         staging.unmap();
+        result
+    }
+
+    /// Read a specific range of a buffer (offset + count elements).
+    pub async fn read_buffer_range_as<T: bytemuck::Pod>(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        buffer: &wgpu::Buffer,
+        offset: u64,
+        count: usize,
+    ) -> Vec<T> {
+        let element_size = std::mem::size_of::<T>() as u64;
+        let byte_size = (count as u64) * element_size;
+
+        if byte_size == 0 {
+            return Vec::new();
+        }
+
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("read_buffer_range_staging"),
+            size: byte_size,
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Copy range to staging
+        let mut encoder = device.create_command_encoder(&Default::default());
+        encoder.copy_buffer_to_buffer(buffer, offset, &staging, 0, byte_size);
+        queue.submit(Some(encoder.finish()));
+
+        // Map staging buffer
+        let slice = staging.slice(..);
+        let (tx, rx) = futures_channel::oneshot::channel();
+        slice.map_async(wgpu::MapMode::Read, move |result| {
+            let _ = tx.send(result);
+        });
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        rx.await.unwrap().unwrap();
+
+        // Copy data
+        let data = slice.get_mapped_range();
+        let result: Vec<T> = bytemuck::cast_slice(&data[..]).to_vec();
+        drop(data);
+        staging.unmap();
+
         result
     }
 
