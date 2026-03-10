@@ -1267,43 +1267,13 @@ impl GpuState {
             pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
         }
 
-        // Submit passes 1-2 and read back flags
+        // Submit passes 1-2 before GPU prefix sum
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-        // Pass 3: CPU prefix sum on flags → compact_map
-        let flags: Vec<u32> = self.buffers.read_buffer_as(
-            device,
-            queue,
-            &self.buffers.compaction_flags,
-            num_uninserted as usize,
-        ).await;
-
-        // DEBUG: Check flags
-        let num_ones = flags.iter().filter(|&&x| x == 1).count();
-        let num_zeros = flags.iter().filter(|&&x| x == 0).count();
-        eprintln!("[COMPACT_DEBUG] Flags: {} ones (keep), {} zeros (exclude), total={}",
-                  num_ones, num_zeros, flags.len());
-        if num_uninserted <= 10 {
-            eprintln!("[COMPACT_DEBUG] Flags: {:?}", flags);
-        }
-
-        // Exclusive prefix sum: compact_map[i] = sum(flags[0..i])
-        let mut compact_map = vec![0u32; num_uninserted as usize];
-        let mut sum = 0u32;
-        for i in 0..num_uninserted as usize {
-            compact_map[i] = sum;
-            sum += flags[i];
-        }
-
-        eprintln!("[COMPACT_DEBUG] Prefix sum result: new_count={}", sum);
-
-        // Upload compact_map to prefix_sum_data buffer (reuse existing buffer)
-        queue.write_buffer(
-            &self.buffers.prefix_sum_data,
-            0,
-            bytemuck::cast_slice(&compact_map),
-        );
+        // Pass 3: GPU prefix sum on flags → compact_map
+        // This is the key optimization: runs entirely on GPU, no CPU readback!
+        let new_count = self.dispatch_gpu_prefix_sum_on_flags(device, queue, num_uninserted).await;
 
         // Pass 4: Scatter non-inserted vertices using compact map
         let mut encoder2 = device.create_command_encoder(&Default::default());
@@ -1319,7 +1289,145 @@ impl GpuState {
 
         // Return encoder and new_count for caller
         // new_count = number of vertices remaining after compaction
-        (encoder2, sum)
+        (encoder2, new_count)
+    }
+
+    /// GPU prefix sum on compaction flags.
+    /// Returns new_count (number of vertices that will remain after compaction).
+    async fn dispatch_gpu_prefix_sum_on_flags(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        num_elements: u32,
+    ) -> u32 {
+        let vec_size = (num_elements + 3) / 4;
+        let thread_blocks = (vec_size + 1023) / 1024;
+
+        // Update params for pack/unpack
+        queue.write_buffer(
+            &self.pipelines.pack_flags_params,
+            0,
+            bytemuck::cast_slice(&[num_elements, 0, 0, 0]),
+        );
+        queue.write_buffer(
+            &self.buffers.prefix_sum_info,
+            0,
+            bytemuck::cast_slice(&[num_elements, vec_size, thread_blocks, 0]),
+        );
+        queue.write_buffer(
+            &self.pipelines.unpack_compact_params,
+            0,
+            bytemuck::cast_slice(&[num_elements, 0, 0, 0]),
+        );
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("gpu_prefix_sum_on_flags"),
+        });
+
+        // Pass 1: Pack flags (u32) → vec4 for GPU prefix sum
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("pack_flags"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.pack_flags_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.pack_flags_bind_group), &[]);
+            pass.dispatch_workgroups((vec_size + 255) / 256, 1, 1);
+        }
+
+        // Pass 2: Reduce
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("reduce"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.reduce_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.reduce_bind_group), &[]);
+            pass.dispatch_workgroups(thread_blocks, 1, 1);
+        }
+
+        // Pass 3: Spine scan
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("spine_scan"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.spine_scan_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.spine_scan_bind_group), &[]);
+            pass.dispatch_workgroups(1, 1, 1);
+        }
+
+        // Pass 4: Downsweep
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("downsweep"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.downsweep_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.downsweep_bind_group), &[]);
+            pass.dispatch_workgroups(thread_blocks, 1, 1);
+        }
+
+        // Pass 5: Unpack vec4 → u32 (result in prefix_sum_data buffer as INCLUSIVE)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("unpack_compact"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.unpack_compact_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.unpack_compact_bind_group), &[]);
+            pass.dispatch_workgroups((vec_size + 255) / 256, 1, 1);
+        }
+
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        // Pass 6: Convert inclusive → exclusive prefix sum
+        queue.write_buffer(
+            &self.pipelines.inclusive_to_exclusive_params,
+            0,
+            bytemuck::cast_slice(&[num_elements, 0, 0, 0]),
+        );
+
+        let mut encoder2 = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("inclusive_to_exclusive"),
+        });
+        {
+            let mut pass = encoder2.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("inclusive_to_exclusive"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.inclusive_to_exclusive_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.inclusive_to_exclusive_bind_group), &[]);
+            pass.dispatch_workgroups((num_elements + 255) / 256, 1, 1);
+        }
+
+        queue.submit(Some(encoder2.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        // Read back last element of prefix sum to get new_count
+        let last_idx = (num_elements - 1) as usize;
+        let compact_map: Vec<u32> = self.buffers.read_buffer_as(
+            device,
+            queue,
+            &self.buffers.prefix_sum_data,
+            last_idx + 1,
+        ).await;
+
+        // new_count = last prefix sum value + last flag value
+        // But since we did exclusive prefix sum, we need to add the last flag
+        // Actually, for exclusive prefix sum: new_count = prefix[n-1] + flags[n-1]
+        // But we don't have flags[n-1] here easily. Let's just read prefix[n] if it exists.
+        // Actually, easier: read one extra element from flags buffer to compute final count
+        let flags: Vec<u32> = self.buffers.read_buffer_as(
+            device,
+            queue,
+            &self.buffers.compaction_flags,
+            last_idx + 1,
+        ).await;
+
+        let new_count = compact_map[last_idx] + flags[last_idx];
+        new_count
     }
 
     /// Dispatch relocate points fast.

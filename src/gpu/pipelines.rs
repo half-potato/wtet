@@ -87,6 +87,17 @@ pub struct Pipelines {
     pub compact_scatter_bind_group: wgpu::BindGroup,
     pub compact_vertex_arrays_params: wgpu::Buffer,
 
+    // Pipelines: pack/unpack for compaction prefix sum
+    pub pack_flags_pipeline: wgpu::ComputePipeline,
+    pub pack_flags_bind_group: wgpu::BindGroup,
+    pub pack_flags_params: wgpu::Buffer,
+    pub unpack_compact_pipeline: wgpu::ComputePipeline,
+    pub unpack_compact_bind_group: wgpu::BindGroup,
+    pub unpack_compact_params: wgpu::Buffer,
+    pub inclusive_to_exclusive_pipeline: wgpu::ComputePipeline,
+    pub inclusive_to_exclusive_bind_group: wgpu::BindGroup,
+    pub inclusive_to_exclusive_params: wgpu::Buffer,
+
     // Pipeline: relocate points fast
     pub relocate_points_fast_pipeline: wgpu::ComputePipeline,
     pub relocate_points_fast_params: wgpu::Buffer,
@@ -1146,6 +1157,117 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- pack_flags (for GPU prefix sum on compaction flags) ---
+        let pack_flags_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("pack_flags_to_vec4.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/pack_flags_to_vec4.wgsl").into()),
+        });
+        let pack_flags_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let pack_flags_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("pack_flags_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // flags (compaction_flags)
+                storage_rw_entry(1),  // scan_in (scan_in_buf)
+                uniform_entry(2),     // params
+            ],
+        });
+        let pack_flags_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("pack_flags_bg"),
+            layout: &pack_flags_bgl,
+            entries: &[
+                buf_entry(0, &bufs.compaction_flags),
+                buf_entry(1, &bufs.scan_in),
+                buf_entry(2, &pack_flags_params),
+            ],
+        });
+        let pack_flags_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("pack_flags_pl"),
+            bind_group_layouts: &[&pack_flags_bgl],
+            immediate_size: 0,
+        });
+        let pack_flags_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("pack_flags"),
+            layout: Some(&pack_flags_pl),
+            module: &pack_flags_shader,
+            entry_point: Some("pack_flags_to_vec4"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- unpack_compact (for unpacking prefix sum result to compact_map) ---
+        let unpack_compact_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("unpack_vec4_to_u32.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/unpack_vec4_to_u32.wgsl").into()),
+        });
+        let unpack_compact_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let unpack_compact_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("unpack_compact_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // scan_out (scan_out_buf)
+                storage_rw_entry(1),  // prefix_sum_data (used as compact_map)
+                uniform_entry(2),     // params
+            ],
+        });
+        let unpack_compact_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("unpack_compact_bg"),
+            layout: &unpack_compact_bgl,
+            entries: &[
+                buf_entry(0, &bufs.scan_out),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &unpack_compact_params),
+            ],
+        });
+        let unpack_compact_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("unpack_compact_pl"),
+            bind_group_layouts: &[&unpack_compact_bgl],
+            immediate_size: 0,
+        });
+        let unpack_compact_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("unpack_compact"),
+            layout: Some(&unpack_compact_pl),
+            module: &unpack_compact_shader,
+            entry_point: Some("unpack_vec4_to_u32"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- inclusive_to_exclusive (convert inclusive prefix sum → exclusive) ---
+        let inclusive_to_exclusive_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("inclusive_to_exclusive.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/inclusive_to_exclusive.wgsl").into()),
+        });
+        let inclusive_to_exclusive_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let inclusive_to_exclusive_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("inclusive_to_exclusive_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // flags
+                storage_rw_entry(1),  // prefix_sum_data (in-place conversion)
+                uniform_entry(2),     // params
+            ],
+        });
+        let inclusive_to_exclusive_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("inclusive_to_exclusive_bg"),
+            layout: &inclusive_to_exclusive_bgl,
+            entries: &[
+                buf_entry(0, &bufs.compaction_flags),
+                buf_entry(1, &bufs.prefix_sum_data),
+                buf_entry(2, &inclusive_to_exclusive_params),
+            ],
+        });
+        let inclusive_to_exclusive_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("inclusive_to_exclusive_pl"),
+            bind_group_layouts: &[&inclusive_to_exclusive_bgl],
+            immediate_size: 0,
+        });
+        let inclusive_to_exclusive_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("inclusive_to_exclusive"),
+            layout: Some(&inclusive_to_exclusive_pl),
+            module: &inclusive_to_exclusive_shader,
+            entry_point: Some("inclusive_to_exclusive"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- relocate_points_fast ---
         let relocate_points_fast_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("relocate_points_fast.wgsl"),
@@ -1437,6 +1559,15 @@ impl Pipelines {
             compact_scatter_pipeline,
             compact_scatter_bind_group,
             compact_vertex_arrays_params,
+            pack_flags_pipeline,
+            pack_flags_bind_group,
+            pack_flags_params,
+            unpack_compact_pipeline,
+            unpack_compact_bind_group,
+            unpack_compact_params,
+            inclusive_to_exclusive_pipeline,
+            inclusive_to_exclusive_bind_group,
+            inclusive_to_exclusive_params,
             relocate_points_fast_pipeline,
             relocate_points_fast_params,
             update_opp_pipeline,
