@@ -7,6 +7,10 @@ pub struct Pipelines {
     // init_bind_group removed - now created dynamically at dispatch time to avoid 128 MB limit
     pub init_params: wgpu::Buffer,
 
+    // Pipeline: init_vert_tet (parallel initialization of vert_tet array)
+    pub init_vert_tet_pipeline: wgpu::ComputePipeline,
+    pub init_vert_tet_bind_group: wgpu::BindGroup,
+
     // Pipeline: vote for point
     pub vote_pipeline: wgpu::ComputePipeline,
     // vote_bind_group removed - now created dynamically at dispatch time
@@ -217,6 +221,66 @@ impl Pipelines {
             layout: Some(&init_pl),
             module: &init_shader,
             entry_point: Some("make_first_tetra"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Init vert_tet pipeline (parallel initialization) ---
+        // Reuse init_bgl since the shader module declares all bindings globally
+        let init_vert_tet_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("init_vert_tet_bg"),
+            layout: &init_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: bufs.points.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: bufs.tets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: bufs.tet_opp.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: bufs.tet_info.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: bufs.vert_tet.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: bufs.free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: bufs.vert_free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: bufs.counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: init_params.as_entire_binding(),
+                },
+            ],
+        });
+
+        let init_vert_tet_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("init_vert_tet_pl"),
+            bind_group_layouts: &[&init_bgl],
+            immediate_size: 0,
+        });
+
+        let init_vert_tet_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("init_vert_tet"),
+            layout: Some(&init_vert_tet_pl),
+            module: &init_shader,
+            entry_point: Some("init_vert_tet"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1518,6 +1582,8 @@ impl Pipelines {
         Self {
             init_pipeline,
             init_params,
+            init_vert_tet_pipeline,
+            init_vert_tet_bind_group,
             vote_pipeline,
             vote_params,
             pick_pipeline,

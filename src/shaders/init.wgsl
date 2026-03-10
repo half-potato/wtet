@@ -118,15 +118,28 @@ fn make_first_tetra() {
         tet_info[i] = TET_ALIVE;
     }
 
-    // All input points start in tet 0 (base tet)
-    for (var i = 0u; i < n; i++) {
-        vert_tet[i] = 0u;
-    }
-
     // Set counters (free stack was pre-filled by CPU with max_tets-1 entries)
     let max_tets = params.y;
     atomicStore(&counters[0], max_tets - 5u); // free_count = max_tets - 5 (5 tets now used)
     atomicStore(&counters[1], 5u);            // active_count = 5
     atomicStore(&counters[2], 0u);            // inserted_count = 0
     atomicStore(&counters[3], 0u);            // failed_count = 0
+}
+
+// Parallel initialization of vert_tet array
+// OPTIMIZATION: This used to be a serial loop in make_first_tetra (2M iterations in 1 thread!)
+// Now runs in parallel with 256 threads/workgroup for massive speedup
+@compute @workgroup_size(256)
+fn init_vert_tet(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+) {
+    let n = params.x;
+    let idx = gid.x;
+
+    if idx >= n {
+        return;
+    }
+
+    // All input points start in tet 0 (base tet)
+    vert_tet[idx] = 0u;
 }
