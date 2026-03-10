@@ -244,11 +244,13 @@ impl GpuBuffers {
             usage: storage_rw,
         });
 
-        let uninserted = device.create_buffer(&wgpu::BufferDescriptor {
+        // Initialize uninserted buffer with vertex IDs [0..num_points]
+        // This is the ONLY place that initializes this buffer - do not remove!
+        let uninserted_init: Vec<u32> = (0..num_points).collect();
+        let uninserted = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("uninserted"),
-            size: (num_points as u64) * 4,
+            contents: bytemuck::cast_slice(&uninserted_init),
             usage: storage_rw,
-            mapped_at_creation: false,
         });
 
         let uninserted_temp = device.create_buffer(&wgpu::BufferDescriptor {
