@@ -2,6 +2,8 @@ pub mod buffers;
 pub mod pipelines;
 pub mod dispatch;
 
+pub use dispatch::FlipCompactMode;
+
 use std::collections::HashMap;
 use crate::types::{*, MEAN_VERTEX_DEGREE};
 use crate::profiler::{GpuProfiler, CpuProfiler};
@@ -34,6 +36,10 @@ pub struct GpuState {
     pub gpu_profiler: Option<GpuProfiler>,
     /// CPU profiler for timing CPU-side operations
     pub cpu_profiler: CpuProfiler,
+    /// Mapping from sorted index to original index (used when Morton sorting is enabled).
+    /// If None, points were not reordered.
+    /// If Some(vec), then sorted_idx i corresponds to original point vec[i].
+    pub point_mapping: Option<Vec<u32>>,
 }
 
 impl GpuState {
@@ -41,11 +47,35 @@ impl GpuState {
         device: &wgpu::Device,
         _queue: &wgpu::Queue,
         points: &[[f32; 3]],
-        _config: &GDelConfig,
+        config: &GDelConfig,
     ) -> Self {
         eprintln!("\n[GPU STATE] Initializing GpuState...");
         let num_points = points.len() as u32;
         eprintln!("[GPU STATE] Input: {} points", num_points);
+
+        // Sort points by Morton code if enabled (reduces iteration count by improving spatial locality)
+        // CUDA Reference: GpuDelaunay.cu:661-684
+        let (sorted_points, point_mapping) = if config.enable_sorting {
+            eprintln!("[GPU STATE] Morton code sorting enabled");
+            let (sorted, mapping) = sort_points_by_morton(points);
+            eprintln!("[GPU STATE] ✓ Points sorted by Morton code");
+
+            // Debug: Show that sorting actually reordered points
+            let mut reordered = 0;
+            for i in 0..mapping.len().min(100) {
+                if mapping[i] != i as u32 {
+                    reordered += 1;
+                }
+            }
+            eprintln!("[GPU STATE] First 100 points: {} reordered, {} unchanged",
+                     reordered, 100 - reordered);
+
+            (sorted, Some(mapping))
+        } else {
+            eprintln!("[GPU STATE] Morton code sorting disabled");
+            (points.to_vec(), None)
+        };
+
         // For block-based allocation, need enough tets to fill all vertex blocks
         // Each vertex (including 4 super-tet + 1 infinity) gets MEAN_VERTEX_DEGREE slots
         // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
@@ -93,7 +123,8 @@ impl GpuState {
         }
 
         // Build point buffer: N real points + 4 super-tet vertices + 1 infinity
-        let mut gpu_points: Vec<GpuPoint> = points
+        // Use sorted_points (which may be reordered by Morton code, or same as input if sorting disabled)
+        let mut gpu_points: Vec<GpuPoint> = sorted_points
             .iter()
             .map(|p| GpuPoint::new(p[0], p[1], p[2]))
             .collect();
@@ -147,6 +178,7 @@ impl GpuState {
             timestamp_period,
             gpu_profiler,
             cpu_profiler,
+            point_mapping,
         }
     }
 
@@ -241,15 +273,38 @@ impl GpuState {
             adjacency.push(remapped);
         }
 
-        // Read failed verts
+        // Phase 3: Remap vertex indices to original point indices (if Morton sorting was used)
+        if let Some(mapping) = &self.point_mapping {
+            eprintln!("[READBACK] Remapping vertex indices from sorted to original order");
+            for tet in &mut tets {
+                for v in tet.iter_mut() {
+                    // Only remap real point indices (0..num_points)
+                    // Leave super-tet (num_points..num_points+4) and infinity (num_points+4) unchanged
+                    if (*v as usize) < mapping.len() {
+                        *v = mapping[*v as usize];
+                    }
+                }
+            }
+        }
+
+        // Read failed verts and remap if needed
         let failed_count = counters.failed_count as usize;
-        let failed_verts = if failed_count > 0 {
+        let mut failed_verts = if failed_count > 0 {
             self.buffers
                 .read_failed_verts(device, queue, failed_count)
                 .await
         } else {
             Vec::new()
         };
+
+        // Remap failed verts to original indices
+        if let Some(mapping) = &self.point_mapping {
+            for v in &mut failed_verts {
+                if (*v as usize) < mapping.len() {
+                    *v = mapping[*v as usize];
+                }
+            }
+        }
 
         DelaunayResult {
             tets,
@@ -338,4 +393,50 @@ impl GpuState {
         let workgroups = (num_threads + 255) / 256;  // Workgroup size = 256
         cpass.dispatch_workgroups(workgroups, 1, 1);
     }
+}
+
+/// Sort points by Morton code (Z-order curve) for better spatial locality.
+///
+/// Returns (sorted_points, mapping) where mapping[i] is the original index
+/// of the point at sorted position i.
+///
+/// CUDA Reference: GpuDelaunay.cu:661-684
+fn sort_points_by_morton(points: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
+    use crate::morton::compute_morton_code;
+
+    // 1. Compute bounding box
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in points {
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+
+    // 2. Compute Morton code for each point and create indexed list
+    let mut indexed_points: Vec<(u32, usize, [f32; 3])> = points
+        .iter()
+        .enumerate()
+        .map(|(i, &pt)| {
+            let morton = compute_morton_code(pt, min, max);
+            (morton, i, pt)
+        })
+        .collect();
+
+    // 3. Sort by Morton code (stable sort preserves order for equal codes)
+    indexed_points.sort_by_key(|(morton, _, _)| *morton);
+
+    // 4. Extract sorted points and mapping
+    let sorted_points: Vec<[f32; 3]> = indexed_points
+        .iter()
+        .map(|(_, _, pt)| *pt)
+        .collect();
+
+    let point_mapping: Vec<u32> = indexed_points
+        .iter()
+        .map(|(_, orig_idx, _)| *orig_idx as u32)
+        .collect();
+
+    (sorted_points, point_mapping)
 }

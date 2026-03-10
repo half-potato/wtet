@@ -1,5 +1,30 @@
 use super::GpuState;
 
+/// Flip compaction mode (adaptive based on queue size)
+/// CUDA Reference: GpuDelaunay.cu:703, 950-958
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FlipCompactMode {
+    /// Small queues: Use atomic collection in mark_rejected_flips, skip separate compaction
+    /// Used when: flip_queue_size < 256
+    CollectCompact,
+
+    /// Large queues: Mark rejected flips, then run 2-pass compaction
+    /// Used when: flip_queue_size >= 256
+    MarkCompact,
+}
+
+impl FlipCompactMode {
+    /// Select compaction mode based on queue size
+    /// CUDA: actNum < BlocksPerGrid * ThreadsPerBlock (= 256)
+    pub fn select(flip_queue_size: u32) -> Self {
+        if flip_queue_size < 256 {
+            Self::CollectCompact
+        } else {
+            Self::MarkCompact
+        }
+    }
+}
+
 /// Dispatch helpers that encode and submit compute passes.
 impl GpuState {
     /// Dispatch the init kernel (single workgroup).
@@ -226,10 +251,14 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.split_points_pipeline);
 
         // Create dynamic bind group
-        let active_tets = self.current_tet_num;
+        // CRITICAL: Cap active_tets to max_tets (buffer capacity)
+        let active_tets = self.current_tet_num.min(self.max_tets);
         let (tets_size, tet_opp_size) = if self.use_partial_binding {
             let size = (active_tets as u64) * 16;
-            (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
+            let max_buffer_size = (self.max_tets as u64) * 16;
+            // Cap to actual buffer size
+            let capped_size = size.min(max_buffer_size);
+            (Some(wgpu::BufferSize::new(capped_size).unwrap()), Some(wgpu::BufferSize::new(capped_size).unwrap()))
         } else {
             (None, None)
         };
@@ -464,10 +493,14 @@ impl GpuState {
         };
 
         // Create dynamic bind group
-        let active_tets = self.current_tet_num;
+        // CRITICAL: Cap active_tets to max_tets (buffer capacity)
+        let active_tets = self.current_tet_num.min(self.max_tets);
         let (tets_size, tet_opp_size) = if self.use_partial_binding {
             let size = (active_tets as u64) * 16;
-            (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
+            let max_buffer_size = (self.max_tets as u64) * 16;
+            // Cap to actual buffer size
+            let capped_size = size.min(max_buffer_size);
+            (Some(wgpu::BufferSize::new(capped_size).unwrap()), Some(wgpu::BufferSize::new(capped_size).unwrap()))
         } else {
             (None, None)
         };
@@ -569,10 +602,14 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.gather_pipeline);
 
         // Create dynamic bind group
-        let active_tets = self.current_tet_num;
+        // CRITICAL: Cap active_tets to max_tets (buffer capacity)
+        let active_tets = self.current_tet_num.min(self.max_tets);
         let (tets_size, tet_opp_size) = if self.use_partial_binding {
             let size = (active_tets as u64) * 16;
-            (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
+            let max_buffer_size = (self.max_tets as u64) * 16;
+            // Cap to actual buffer size
+            let capped_size = size.min(max_buffer_size);
+            (Some(wgpu::BufferSize::new(capped_size).unwrap()), Some(wgpu::BufferSize::new(capped_size).unwrap()))
         } else {
             (None, None)
         };
@@ -822,10 +859,14 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.update_flip_trace_pipeline);
 
         // Create dynamic bind group
+        // CRITICAL: Cap binding size to actual buffer capacity (max_flips = max_tets/2)
         let (offset, size) = if self.use_partial_binding {
             let offset = (org_flip_num as u64) * 32; // FlipItem = 32 bytes
-            let size = (flip_num as u64) * 32;
-            (offset, Some(wgpu::BufferSize::new(size).unwrap()))
+            let requested_size = (flip_num as u64) * 32;
+            let max_flip_arr_size = (self.max_flips as u64) * 32;
+            // Cap size to remaining buffer space after offset
+            let capped_size = requested_size.min(max_flip_arr_size.saturating_sub(offset));
+            (offset, Some(wgpu::BufferSize::new(capped_size).unwrap()))
         } else {
             (0, None)
         };
@@ -892,10 +933,14 @@ impl GpuState {
         pass.set_pipeline(&self.pipelines.update_opp_pipeline);
 
         // Create dynamic bind group
+        // CRITICAL: Cap binding size to actual buffer capacity (max_flips = max_tets/2)
         let (offset, size) = if self.use_partial_binding {
             let offset = (org_flip_num as u64) * 32; // FlipItem = 32 bytes
-            let size = (flip_num as u64) * 32;
-            (offset, Some(wgpu::BufferSize::new(size).unwrap()))
+            let requested_size = (flip_num as u64) * 32;
+            let max_flip_arr_size = (self.max_flips as u64) * 32;
+            // Cap size to remaining buffer space after offset
+            let capped_size = requested_size.min(max_flip_arr_size.saturating_sub(offset));
+            (offset, Some(wgpu::BufferSize::new(capped_size).unwrap()))
         } else {
             (0, None)
         };
@@ -1441,7 +1486,11 @@ impl GpuState {
         let flip_arr_size = if self.use_partial_binding && total_flips > 0 {
             // relocate_points_fast needs to walk FULL accumulated flip chain
             // Bind [0, total_flips) not just current batch
-            Some(wgpu::BufferSize::new((total_flips as u64) * 32).unwrap()) // FlipItem = 32 bytes
+            // CRITICAL: Cap to actual buffer capacity (max_flips = max_tets/2)
+            let requested_size = (total_flips as u64) * 32; // FlipItem = 32 bytes
+            let max_flip_arr_size = (self.max_flips as u64) * 32;
+            let capped_size = requested_size.min(max_flip_arr_size);
+            Some(wgpu::BufferSize::new(capped_size).unwrap())
         } else {
             None
         };

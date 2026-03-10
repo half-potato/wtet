@@ -734,14 +734,26 @@ impl GpuBuffers {
         vals[0]
     }
 
-    /// Read compaction counter (from counters[0] after compact_if_negative pass 1).
+    /// Read collection counter (from counters[0] after mark_rejected_flips collection).
+    /// Used in CollectCompact mode.
+    pub async fn read_collection_count(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+    ) -> u32 {
+        let counters = self.read_counters(device, queue).await;
+        counters.free_count // counter[0]
+    }
+
+    /// Read compaction counter (from counters[1] after compact_if_negative pass 2).
+    /// Used in MarkCompact mode.
     pub async fn read_compact_count(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
     ) -> u32 {
         let counters = self.read_counters(device, queue).await;
-        counters.free_count // Using free_count as counter[0]
+        counters.active_count // counter[1] (final compacted count)
     }
 
     /// Write a uniform params buffer (vec4<u32>).

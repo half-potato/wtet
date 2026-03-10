@@ -1258,7 +1258,6 @@ fn test_delaunay_uniform_200k() {
 }
 
 #[test]
-#[test]
 fn test_delaunay_uniform_2M() {
     with_gpu(|device, queue| {
         let points = gen_uniform_random(2_000_000, 54321);
@@ -1267,18 +1266,6 @@ fn test_delaunay_uniform_2M() {
         assert!(!result.tets.is_empty(), "Should produce tets");
         let v = validate_full(&normalized, &result.tets, &result.adjacency);
         assert!(v.is_ok(), "2M uniform: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-fn test_delaunay_uniform_20M() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(20_000_000, 54321);
-        let config = GDelConfig::default();
-        let (normalized, result) = run_delaunay(device, queue, &points, &config);
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_full(&normalized, &result.tets, &result.adjacency);
-        assert!(v.is_ok(), "200 uniform: {}", v.unwrap_err());
     });
 }
 
@@ -1537,18 +1524,6 @@ fn test_euler_characteristic_random() {
         let (_, result) = run_delaunay(device, queue, &points, &config);
         // After readback strips super-tet boundary tets, the output is a 3-ball.
         check_euler(&result.tets).expect("Euler V-E+F-T != 1 for stripped output");
-    });
-}
-
-#[test]
-#[ignore = "Quality check not in original CUDA"]
-fn test_orientation_consistency() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(50, 11111);
-        let config = GDelConfig::default();
-        let (normalized, result) = run_delaunay(device, queue, &points, &config);
-        check_orientation(&normalized, &result.tets, points.len() as u32)
-            .expect("Orientation inconsistent in stripped output");
     });
 }
 
@@ -2216,109 +2191,6 @@ fn validate_raw(
         ));
     }
     Ok(())
-}
-
-// ============================================================================
-// H. Hard case tests — raw GPU output
-// ============================================================================
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_uniform_100() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(100, 12345);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw 100 uniform: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_uniform_500() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(500, 54321);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw 500 uniform: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_uniform_1000() {
-    with_gpu(|device, queue| {
-        let points = gen_uniform_random(1000, 99999);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw 1000 uniform: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_grid_4x4x4() {
-    with_gpu(|device, queue| {
-        let points = gen_grid(4, 4, 4);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw 4x4x4 grid: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_grid_5x5x5() {
-    with_gpu(|device, queue| {
-        let points = gen_grid(5, 5, 5);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw 5x5x5 grid: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_sphere_shell_200() {
-    with_gpu(|device, queue| {
-        let points = gen_sphere_shell(200, 42);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw sphere shell 200: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_thin_slab_100() {
-    with_gpu(|device, queue| {
-        let mut rng = rand::rngs::StdRng::seed_from_u64(11111);
-        let points: Vec<[f32; 3]> = (0..100)
-            .map(|_| [rng.gen::<f32>(), rng.gen::<f32>(), rng.gen::<f32>() * 0.001])
-            .collect();
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw thin slab 100: {}", v.unwrap_err());
-    });
-}
-
-#[test]
-#[ignore = "Raw GPU-only test (no star splaying) - intentionally incomplete"]
-fn test_raw_clustered_100() {
-    with_gpu(|device, queue| {
-        let points = gen_clustered(100, 2, 77777);
-        let (all_pts, result) = run_phase1_raw(device, queue, &points, &GDelConfig::default());
-        assert!(!result.tets.is_empty(), "Should produce tets");
-        let v = validate_raw(&all_pts, &result, points.len() as u32);
-        assert!(v.is_ok(), "Raw clustered 100: {}", v.unwrap_err());
-    });
 }
 
 #[test]

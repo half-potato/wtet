@@ -9,7 +9,7 @@
 //! 6. Remove inserted points from uninserted list
 //! 7. Repeat until all points inserted or budget exhausted
 
-use crate::gpu::GpuState;
+use crate::gpu::{GpuState, FlipCompactMode};
 use crate::types::GDelConfig;
 use std::time::Instant;
 
@@ -262,18 +262,32 @@ pub async fn run(
                 // STEP 2: VALIDATE - Mark rejected flips
                 state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
 
-                // STEP 3: COMPACT - Remove rejected flips
-                state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
+                // STEP 3: COMPACT (ADAPTIVE) - Remove rejected flips
+                let compact_mode = FlipCompactMode::select(flip_queue_size);
 
-                queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                let flip_count = match compact_mode {
+                    FlipCompactMode::CollectCompact => {
+                        // Collection already done in mark_rejected_flips with atomic counters
+                        // Just read the counter[0] result
+                        queue.submit(Some(encoder.finish()));
+                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-                // Read compacted flip count
-                let flip_count = state.buffers.read_compact_count(device, queue).await;
+                        state.buffers.read_collection_count(device, queue).await  // Read counters[0]
+                    }
+                    FlipCompactMode::MarkCompact => {
+                        // Run traditional 2-pass compaction
+                        state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
+                        queue.submit(Some(encoder.finish()));
+                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-                log::debug!(
-                    "Flip iteration {}: {} active -> {} valid flips",
-                    flip_iter,
+                        state.buffers.read_compact_count(device, queue).await  // Read counters[1]
+                    }
+                };
+
+                eprintln!(
+                    "[FLIP] Iteration {}: mode={:?}, input={}, output={}",
+                    flip_iter + 1,
+                    compact_mode,
                     flip_queue_size,
                     flip_count
                 );
@@ -361,18 +375,32 @@ pub async fn run(
                     // STEP 2: VALIDATE - Mark rejected flips
                     state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
 
-                    // STEP 3: COMPACT - Remove rejected flips
-                    state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
+                    // STEP 3: COMPACT (ADAPTIVE) - Remove rejected flips
+                    let compact_mode = FlipCompactMode::select(flip_queue_size);
 
-                    queue.submit(Some(encoder.finish()));
-                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                    let flip_count = match compact_mode {
+                        FlipCompactMode::CollectCompact => {
+                            // Collection already done in mark_rejected_flips with atomic counters
+                            // Just read the counter[0] result
+                            queue.submit(Some(encoder.finish()));
+                            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-                    // Read compacted flip count
-                    let flip_count = state.buffers.read_compact_count(device, queue).await;
+                            state.buffers.read_collection_count(device, queue).await  // Read counters[0]
+                        }
+                        FlipCompactMode::MarkCompact => {
+                            // Run traditional 2-pass compaction
+                            state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
+                            queue.submit(Some(encoder.finish()));
+                            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+                            state.buffers.read_compact_count(device, queue).await  // Read counters[1]
+                        }
+                    };
 
                     eprintln!(
-                        "[FLIP-EXACT] Iteration {}: {} active -> {} valid flips",
-                        flip_iter,
+                        "[FLIP-EXACT] Iteration {}: mode={:?}, input={}, output={}",
+                        flip_iter + 1,
+                        compact_mode,
                         flip_queue_size,
                         flip_count
                     );
@@ -463,10 +491,10 @@ pub async fn run(
                 .buffers
                 .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
                 .await;
-            println!(
-                "[DEBUG_COMPACT] Before compaction: insert_list = {:?}",
-                insert_list_before
-            );
+            // println!(
+            //     "[DEBUG_COMPACT] Before compaction: insert_list = {:?}",
+            //     insert_list_before
+            // );
 
             // Dispatch GPU compaction (mark → invert → CPU prefix sum → scatter)
             // Eliminates O(N²) linear search bottleneck!
@@ -496,10 +524,10 @@ pub async fn run(
 
         // Use new_count from compaction (no need to read counters anymore)
         let new_count = new_count_from_compact;
-        println!(
-            "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
-            iteration, num_uninserted, num_inserted, new_count
-        );
+        // println!(
+        //     "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
+        //     iteration, num_uninserted, num_inserted, new_count
+        // );
 
         // Update CPU state (count only, array stays on GPU)
         state.num_uninserted = new_count;

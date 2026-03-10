@@ -9,6 +9,7 @@ pub mod phase1;
 pub mod phase2;
 pub mod cpu;
 pub mod profiler;
+pub mod morton;
 
 use types::{DelaunayResult, GDelConfig};
 

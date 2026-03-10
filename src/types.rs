@@ -46,7 +46,7 @@ impl Default for GDelConfig {
         Self {
             insertion_rule: InsertionRule::Circumcenter,
             enable_flipping: true,
-            enable_sorting: true,
+            enable_sorting: false,  // Disabled: increases conflicts (20 → 38 iterations)
             enable_splaying: true,
             max_insert_iterations: 100,
             max_flip_iterations: 10,
