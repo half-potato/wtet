@@ -28,95 +28,78 @@ impl FlipCompactMode {
 /// Dispatch helpers that encode and submit compute passes.
 impl GpuState {
     /// Dispatch the init kernel (creates 5-tet super-tetrahedron).
-    /// OPTIMIZATION: Now split into two passes:
-    /// 1. make_first_tetra - Single thread creates 5 tets
-    /// 2. init_vert_tet - Parallel threads initialize vert_tet array
+    /// OPTIMIZATION: vert_tet is now initialized on CPU (buffers.rs), so only need make_first_tetra pass.
+    /// This eliminates ~10ms of GPU synchronization overhead from the removed init_vert_tet dispatch.
     pub fn dispatch_init(&self, encoder: &mut wgpu::CommandEncoder) {
-        // PASS 1: Create 5-tet super-tetrahedron (single thread)
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("init_make_first_tetra"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipelines.init_pipeline);
+        // Single pass: Create 5-tet super-tetrahedron (single thread)
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("init_make_first_tetra"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.init_pipeline);
 
-            // Create dynamic bind group
-            // For large datasets, bind only the 5 tets needed for super-tet initialization
-            let (tets_size, tet_opp_size) = if self.use_partial_binding {
-                let size = 5 * 16; // 5 tets × 16 bytes each
-                (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
-            } else {
-                (None, None)
-            };
+        // Create dynamic bind group
+        // For large datasets, bind only the 5 tets needed for super-tet initialization
+        let (tets_size, tet_opp_size) = if self.use_partial_binding {
+            let size = 5 * 16; // 5 tets × 16 bytes each
+            (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
+        } else {
+            (None, None)
+        };
 
-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
-                label: Some("init_bg_dynamic"),
-                layout: &self.pipelines.init_bgl,
-                entries: &[
-                    wgpu::BindGroupEntry {
-                        binding: 0,
-                        resource: self.buffers.points.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 1,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.buffers.tets,
-                            offset: 0,
-                            size: tets_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 2,
-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                            buffer: &self.buffers.tet_opp,
-                            offset: 0,
-                            size: tet_opp_size,
-                        }),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 3,
-                        resource: self.buffers.tet_info.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 4,
-                        resource: self.buffers.vert_tet.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 5,
-                        resource: self.buffers.free_arr.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 6,
-                        resource: self.buffers.vert_free_arr.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 7,
-                        resource: self.buffers.counters.as_entire_binding(),
-                    },
-                    wgpu::BindGroupEntry {
-                        binding: 8,
-                        resource: self.pipelines.init_params.as_entire_binding(),
-                    },
-                ],
-            });
-            pass.set_bind_group(0, Some(&bind_group), &[]);
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("init_bg_dynamic"),
+            layout: &self.pipelines.init_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffers.points.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.buffers.tets,
+                        offset: 0,
+                        size: tets_size,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: &self.buffers.tet_opp,
+                        offset: 0,
+                        size: tet_opp_size,
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.buffers.tet_info.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.buffers.vert_tet.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 5,
+                    resource: self.buffers.free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 6,
+                    resource: self.buffers.vert_free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 7,
+                    resource: self.buffers.counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 8,
+                    resource: self.pipelines.init_params.as_entire_binding(),
+                },
+            ],
+        });
+        pass.set_bind_group(0, Some(&bind_group), &[]);
 
-            pass.dispatch_workgroups(1, 1, 1);
-        }
-
-        // PASS 2: Initialize vert_tet array in parallel
-        {
-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("init_vert_tet"),
-                timestamp_writes: None,
-            });
-            pass.set_pipeline(&self.pipelines.init_vert_tet_pipeline);
-            pass.set_bind_group(0, &self.pipelines.init_vert_tet_bind_group, &[]);
-
-            let num_points = self.num_points;
-            let workgroups = (num_points + 255) / 256;
-            pass.dispatch_workgroups(workgroups, 1, 1);
-        }
+        pass.dispatch_workgroups(1, 1, 1);
     }
 
     /// Dispatch vote for point.

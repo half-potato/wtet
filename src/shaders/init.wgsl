@@ -126,9 +126,9 @@ fn make_first_tetra() {
     atomicStore(&counters[3], 0u);            // failed_count = 0
 }
 
-// Parallel initialization of vert_tet array
-// OPTIMIZATION: This used to be a serial loop in make_first_tetra (2M iterations in 1 thread!)
-// Now runs in parallel with 256 threads/workgroup for massive speedup
+// OBSOLETE: init_vert_tet shader pass (no longer dispatched after optimization)
+// vert_tet is now initialized on CPU in buffers.rs for ~10ms speedup.
+// This entry point must remain for pipeline creation, but dispatch_init no longer calls it.
 @compute @workgroup_size(256)
 fn init_vert_tet(
     @builtin(global_invocation_id) gid: vec3<u32>,

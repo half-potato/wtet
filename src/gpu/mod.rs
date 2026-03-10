@@ -53,9 +53,26 @@ impl GpuState {
         let num_points = points.len() as u32;
         eprintln!("[GPU STATE] Input: {} points", num_points);
 
-        // Sort points by Morton code if enabled (reduces iteration count by improving spatial locality)
+        // Sort points for better spatial locality (reduces voting conflicts during insertion)
+        // Priority: Hilbert (stratified) > Morton > Sequential
         // CUDA Reference: GpuDelaunay.cu:661-684
-        let (sorted_points, point_mapping) = if config.enable_sorting {
+        let (sorted_points, point_mapping) = if config.enable_hilbert_sorting {
+            eprintln!("[GPU STATE] Hilbert curve sorting enabled (stratified sampling)");
+            let (sorted, mapping) = sort_points_by_hilbert(points);
+            eprintln!("[GPU STATE] ✓ Points sorted by Hilbert curve with stratified sampling");
+
+            // Debug: Show that sorting actually reordered points
+            let mut reordered = 0;
+            for i in 0..mapping.len().min(100) {
+                if mapping[i] != i as u32 {
+                    reordered += 1;
+                }
+            }
+            eprintln!("[GPU STATE] First 100 points: {} reordered, {} unchanged",
+                     reordered, 100 - reordered);
+
+            (sorted, Some(mapping))
+        } else if config.enable_sorting {
             eprintln!("[GPU STATE] Morton code sorting enabled");
             let (sorted, mapping) = sort_points_by_morton(points);
             eprintln!("[GPU STATE] ✓ Points sorted by Morton code");
@@ -72,7 +89,7 @@ impl GpuState {
 
             (sorted, Some(mapping))
         } else {
-            eprintln!("[GPU STATE] Morton code sorting disabled");
+            eprintln!("[GPU STATE] Sequential insertion order (no reordering)");
             (points.to_vec(), None)
         };
 
@@ -439,4 +456,241 @@ fn sort_points_by_morton(points: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
         .collect();
 
     (sorted_points, point_mapping)
+}
+
+/// Sort points by Hilbert curve index, then apply strided sampling.
+///
+/// Strategy:
+/// 1. Sort points by Hilbert curve index (establishes spatial ordering)
+/// 2. Apply strided sampling to distribute insertions across the curve
+///
+/// Strided sampling inserts every Nth point in the first pass, ensuring
+/// good spatial distribution and reduced voting conflicts.
+///
+/// Returns (sorted_points, mapping) where mapping[i] is the original index
+/// of the point at sorted position i.
+fn sort_points_by_hilbert(points: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
+    use crate::hilbert::compute_hilbert_index;
+
+    // 1. Compute bounding box
+    let mut min = [f32::MAX; 3];
+    let mut max = [f32::MIN; 3];
+    for p in points {
+        for i in 0..3 {
+            min[i] = min[i].min(p[i]);
+            max[i] = max[i].max(p[i]);
+        }
+    }
+
+    // 2. Compute Hilbert indices using established algorithm (hilbert_index crate)
+    let mut indexed_points: Vec<(usize, usize, [f32; 3])> = points
+        .iter()
+        .enumerate()
+        .map(|(i, &pt)| {
+            let hilbert_idx = compute_hilbert_index(pt, min, max);
+            (hilbert_idx, i, pt)
+        })
+        .collect();
+
+    // 3. Sort by Hilbert index (stable sort preserves order for equal codes)
+    indexed_points.sort_by_key(|(hilbert_idx, _, _)| *hilbert_idx);
+
+    // 4. Apply stratified (hierarchical) sampling to reorder the Hilbert-sorted points
+    // Start with wide stride (~0.1% sampling), progressively narrow to fill gaps
+    // For 2M points: sqrt(2M) ≈ 1414 stride → ~1400 points in first pass (~0.07%)
+    let n = indexed_points.len();
+    let initial_stride = calculate_initial_stride(n);
+    eprintln!("[GPU STATE] Stratified sampling: {} points, initial stride = {} (~{:.2}% first pass)",
+              n, initial_stride, 100.0 / initial_stride as f64);
+    let strided_points = apply_strided_sampling_indexed(&indexed_points, initial_stride);
+
+    // 5. Extract final points and mapping
+    let sorted_points: Vec<[f32; 3]> = strided_points
+        .iter()
+        .map(|(_, _, pt)| *pt)
+        .collect();
+
+    let point_mapping: Vec<u32> = strided_points
+        .iter()
+        .map(|(_, orig_idx, _)| *orig_idx as u32)
+        .collect();
+
+    (sorted_points, point_mapping)
+}
+
+/// Calculate initial stride for stratified sampling based on point count.
+///
+/// Uses aggressive square root scaling to ensure very sparse initial sampling:
+/// - 100 points: stride 64 → 1 point (~1.5%)
+/// - 1K points: stride 64 → 15 points (~1.5%)
+/// - 10K points: stride 128 → 78 points (~0.8%)
+/// - 100K points: stride 512 → 195 points (~0.2%)
+/// - 1M points: stride 2048 → 488 points (~0.05%)
+/// - 2M points: stride 4096 → 488 points (~0.02%)
+///
+/// For large datasets (>100K), this ensures first pass inserts <0.1% of points.
+fn calculate_initial_stride(num_points: usize) -> usize {
+    // Aggressive scaling: sqrt(N) * 1.5 for large datasets
+    let sqrt_n = (num_points as f64).sqrt();
+    let scaled = if num_points > 100_000 {
+        sqrt_n * 2.0  // 2x more aggressive for large datasets
+    } else {
+        sqrt_n
+    };
+    let stride = scaled.max(64.0).min(16384.0);
+
+    // Round UP to nearest power of 2 for clean halving pattern and sparser sampling
+    let log2 = stride.log2().ceil();
+    let stride_pow2 = (2.0_f64).powf(log2) as usize;
+
+    stride_pow2
+}
+
+/// Apply stratified (hierarchical) sampling to reorder points.
+///
+/// Strategy: Insert points in multiple passes with progressively narrowing strides.
+/// This ensures good spatial distribution at all scales.
+///
+/// Example with initial_stride=128:
+/// - Pass 1 (stride 128): [0, 128, 256, 384, ...]        <- ~1% of points
+/// - Pass 2 (stride 64):  [64, 192, 320, 448, ...]       <- ~1% more
+/// - Pass 3 (stride 32):  [32, 96, 160, 224, 288, ...]   <- ~2% more
+/// - Pass 4 (stride 16):  [16, 48, 80, 112, 144, ...]    <- ~4% more
+/// - Pass 5 (stride 8):   [8, 24, 40, 56, 72, ...]       <- ~8% more
+/// - Pass 6 (stride 4):   [4, 12, 20, 28, 36, ...]       <- ~16% more
+/// - Pass 7 (stride 2):   [2, 6, 10, 14, 18, 22, ...]    <- ~32% more
+/// - Pass 8 (stride 1):   [1, 3, 5, 7, 9, 11, ...]       <- remaining ~35%
+///
+/// This creates a multi-scale spatial distribution that reduces voting conflicts.
+///
+/// # Arguments
+/// * `indexed_points` - Points sorted by Hilbert index
+/// * `initial_stride` - Starting stride (e.g., 128 for ~1% initial sampling)
+///
+/// # Returns
+/// Reordered points with stratified sampling applied
+fn apply_strided_sampling_indexed(
+    indexed_points: &[(usize, usize, [f32; 3])],
+    initial_stride: usize,
+) -> Vec<(usize, usize, [f32; 3])> {
+    let n = indexed_points.len();
+    let mut result = Vec::with_capacity(n);
+    let mut inserted = vec![false; n];
+
+    // Start with widest stride, progressively halve
+    let mut stride = initial_stride;
+    while stride >= 1 {
+        // Insert points at indices [0, stride, 2*stride, 3*stride, ...]
+        // that haven't been inserted yet
+        let mut i = 0;
+        while i < n {
+            if !inserted[i] {
+                result.push(indexed_points[i]);
+                inserted[i] = true;
+            }
+            i += stride;
+        }
+
+        // Halve stride for next pass (progressively fill gaps)
+        stride /= 2;
+    }
+
+    result
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_stratified_sampling_pattern() {
+        // Create test data: 16 points with indices 0-15
+        let indexed: Vec<(usize, usize, [f32; 3])> = (0..16)
+            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
+            .collect();
+
+        // Apply stratified sampling with initial stride 8
+        let strided = apply_strided_sampling_indexed(&indexed, 8);
+
+        // Extract just the indices for verification
+        let indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
+
+        // Expected pattern with initial stride 8 (progressively halving):
+        // Pass 1 (stride 8): 0, 8           <- ~12% of points (2/16)
+        // Pass 2 (stride 4): 4, 12          <- ~12% more (2/16)
+        // Pass 3 (stride 2): 2, 6, 10, 14   <- ~25% more (4/16)
+        // Pass 4 (stride 1): 1, 3, 5, 7, 9, 11, 13, 15 <- remaining ~50% (8/16)
+        let expected = vec![
+            0, 8,               // Wide spacing (stride 8)
+            4, 12,              // Half the spacing (stride 4)
+            2, 6, 10, 14,       // Half again (stride 2)
+            1, 3, 5, 7, 9, 11, 13, 15, // Fill remaining (stride 1)
+        ];
+
+        assert_eq!(indices, expected,
+            "Stratified sampling should produce hierarchical pattern [0,8, 4,12, 2,6,10,14, ...]");
+    }
+
+    #[test]
+    fn test_stratified_sampling_preserves_count() {
+        let indexed: Vec<(usize, usize, [f32; 3])> = (0..100)
+            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
+            .collect();
+
+        let strided = apply_strided_sampling_indexed(&indexed, 64);
+
+        assert_eq!(strided.len(), 100, "Stratified sampling should preserve point count");
+
+        // Verify all original indices are present
+        let mut indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
+        indices.sort();
+        let expected: Vec<usize> = (0..100).collect();
+        assert_eq!(indices, expected, "All original indices should be present");
+    }
+
+    #[test]
+    fn test_calculate_initial_stride() {
+        // Verify stride calculation scales appropriately
+        assert_eq!(calculate_initial_stride(100), 64);        // Small: ~1.5%
+        assert_eq!(calculate_initial_stride(1_000), 64);      // 1K: ~1.5%
+        assert_eq!(calculate_initial_stride(10_000), 128);    // 10K: ~0.8%
+        assert_eq!(calculate_initial_stride(100_000), 512);   // 100K: ~0.2%
+        assert_eq!(calculate_initial_stride(1_000_000), 2048); // 1M: ~0.05%
+        assert_eq!(calculate_initial_stride(2_000_000), 4096); // 2M: ~0.02%
+
+        // Edge cases
+        assert_eq!(calculate_initial_stride(10), 64);       // Min clamp
+        assert_eq!(calculate_initial_stride(1_000_000_000), 16384); // Max clamp
+
+        // Verify first pass percentages are reasonable
+        let stride_2m = calculate_initial_stride(2_000_000);
+        let first_pass = 2_000_000 / stride_2m;
+        assert!(first_pass < 1000, "2M points should insert <1000 in first pass (got {})", first_pass);
+    }
+
+    #[test]
+    fn test_stratified_sampling_order() {
+        // Test that first few points are widely spaced
+        let indexed: Vec<(usize, usize, [f32; 3])> = (0..256)
+            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
+            .collect();
+
+        let strided = apply_strided_sampling_indexed(&indexed, 128);
+        let indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
+
+        // First pass (stride 128): should insert indices [0, 128]
+        assert_eq!(indices[0], 0, "First point should be at index 0");
+        assert_eq!(indices[1], 128, "Second point should be at index 128");
+
+        // Second pass (stride 64): should insert indices [64, 192]
+        assert_eq!(indices[2], 64, "Third point should be at index 64");
+        assert_eq!(indices[3], 192, "Fourth point should be at index 192");
+
+        // Verify hierarchical refinement continues
+        // After 2 passes with stride 128→64, we should have 4 points: [0, 128, 64, 192]
+        assert!(indices[0..4].contains(&0));
+        assert!(indices[0..4].contains(&64));
+        assert!(indices[0..4].contains(&128));
+        assert!(indices[0..4].contains(&192));
+    }
 }

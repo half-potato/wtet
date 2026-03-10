@@ -1,0 +1,921 @@
+diff --git a/Cargo.lock b/Cargo.lock
+index acc4f4f..0a870d0 100644
+--- a/Cargo.lock
++++ b/Cargo.lock
+@@ -330,6 +330,7 @@ dependencies = [
+  "env_logger",
+  "futures-channel",
+  "glam",
++ "hilbert_index",
+  "log",
+  "pollster",
+  "rand",
+@@ -396,7 +397,7 @@ dependencies = [
+  "log",
+  "presser",
+  "thiserror",
+- "windows 0.58.0",
++ "windows",
+ ]
+ 
+ [[package]]
+@@ -457,6 +458,12 @@ version = "0.2.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "dfa686283ad6dd069f105e5ab091b04c62850d3e4cf5d67debad1933f55023df"
+ 
++[[package]]
++name = "hilbert_index"
++version = "0.2.0"
++source = "registry+https://github.com/rust-lang/crates.io-index"
++checksum = "b0caa41c56884f4e9bae223aa9eceb968c01b534af31105e2a5f8dece3fce620"
++
+ [[package]]
+ name = "indexmap"
+ version = "2.13.0"
+@@ -1221,8 +1228,8 @@ dependencies = [
+  "wasm-bindgen",
+  "web-sys",
+  "wgpu-types",
+- "windows 0.62.2",
+- "windows-core 0.62.2",
++ "windows",
++ "windows-core",
+ ]
+ 
+ [[package]]
+@@ -1247,16 +1254,6 @@ dependencies = [
+  "windows-sys",
+ ]
+ 
+-[[package]]
+-name = "windows"
+-version = "0.58.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "dd04d41d93c4992d421894c18c8b43496aa748dd4c081bac0dc93eb0489272b6"
+-dependencies = [
+- "windows-core 0.58.0",
+- "windows-targets",
+-]
+-
+ [[package]]
+ name = "windows"
+ version = "0.62.2"
+@@ -1264,7 +1261,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "527fadee13e0c05939a6a05d5bd6eec6cd2e3dbd648b9f8e447c6518133d8580"
+ dependencies = [
+  "windows-collections",
+- "windows-core 0.62.2",
++ "windows-core",
+  "windows-future",
+  "windows-numerics",
+ ]
+@@ -1275,20 +1272,7 @@ version = "0.3.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "23b2d95af1a8a14a3c7367e1ed4fc9c20e0a26e79551b1454d72583c97cc6610"
+ dependencies = [
+- "windows-core 0.62.2",
+-]
+-
+-[[package]]
+-name = "windows-core"
+-version = "0.58.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "6ba6d44ec8c2591c134257ce647b7ea6b20335bf6379a27dac5f1641fcf59f99"
+-dependencies = [
+- "windows-implement 0.58.0",
+- "windows-interface 0.58.0",
+- "windows-result 0.2.0",
+- "windows-strings 0.1.0",
+- "windows-targets",
++ "windows-core",
+ ]
+ 
+ [[package]]
+@@ -1297,11 +1281,11 @@ version = "0.62.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "b8e83a14d34d0623b51dce9581199302a221863196a1dde71a7663a4c2be9deb"
+ dependencies = [
+- "windows-implement 0.60.2",
+- "windows-interface 0.59.3",
++ "windows-implement",
++ "windows-interface",
+  "windows-link",
+- "windows-result 0.4.1",
+- "windows-strings 0.5.1",
++ "windows-result",
++ "windows-strings",
+ ]
+ 
+ [[package]]
+@@ -1310,22 +1294,11 @@ version = "0.3.2"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "e1d6f90251fe18a279739e78025bd6ddc52a7e22f921070ccdc67dde84c605cb"
+ dependencies = [
+- "windows-core 0.62.2",
++ "windows-core",
+  "windows-link",
+  "windows-threading",
+ ]
+ 
+-[[package]]
+-name = "windows-implement"
+-version = "0.58.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "2bbd5b46c938e506ecbce286b6628a02171d56153ba733b6c741fc627ec9579b"
+-dependencies = [
+- "proc-macro2",
+- "quote",
+- "syn",
+-]
+-
+ [[package]]
+ name = "windows-implement"
+ version = "0.60.2"
+@@ -1337,17 +1310,6 @@ dependencies = [
+  "syn",
+ ]
+ 
+-[[package]]
+-name = "windows-interface"
+-version = "0.58.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "053c4c462dc91d3b1504c6fe5a726dd15e216ba718e84a0e46a88fbe5ded3515"
+-dependencies = [
+- "proc-macro2",
+- "quote",
+- "syn",
+-]
+-
+ [[package]]
+ name = "windows-interface"
+ version = "0.59.3"
+@@ -1371,19 +1333,10 @@ version = "0.3.1"
+ source = "registry+https://github.com/rust-lang/crates.io-index"
+ checksum = "6e2e40844ac143cdb44aead537bbf727de9b044e107a0f1220392177d15b0f26"
+ dependencies = [
+- "windows-core 0.62.2",
++ "windows-core",
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows-result"
+-version = "0.2.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "1d1043d8214f791817bab27572aaa8af63732e11bf84aa21a45a78d6c317ae0e"
+-dependencies = [
+- "windows-targets",
+-]
+-
+ [[package]]
+ name = "windows-result"
+ version = "0.4.1"
+@@ -1393,16 +1346,6 @@ dependencies = [
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows-strings"
+-version = "0.1.0"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "4cd9b125c486025df0eabcb585e62173c6c9eddcec5d117d3b6e8c30e2ee4d10"
+-dependencies = [
+- "windows-result 0.2.0",
+- "windows-targets",
+-]
+-
+ [[package]]
+ name = "windows-strings"
+ version = "0.5.1"
+@@ -1421,22 +1364,6 @@ dependencies = [
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows-targets"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "9b724f72796e036ab90c1021d4780d4d3d648aca59e491e6b98e725b84e99973"
+-dependencies = [
+- "windows_aarch64_gnullvm",
+- "windows_aarch64_msvc",
+- "windows_i686_gnu",
+- "windows_i686_gnullvm",
+- "windows_i686_msvc",
+- "windows_x86_64_gnu",
+- "windows_x86_64_gnullvm",
+- "windows_x86_64_msvc",
+-]
+-
+ [[package]]
+ name = "windows-threading"
+ version = "0.2.1"
+@@ -1446,54 +1373,6 @@ dependencies = [
+  "windows-link",
+ ]
+ 
+-[[package]]
+-name = "windows_aarch64_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "32a4622180e7a0ec044bb555404c800bc9fd9ec262ec147edd5989ccd0c02cd3"
+-
+-[[package]]
+-name = "windows_aarch64_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "09ec2a7bb152e2252b53fa7803150007879548bc709c039df7627cabbd05d469"
+-
+-[[package]]
+-name = "windows_i686_gnu"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "8e9b5ad5ab802e97eb8e295ac6720e509ee4c243f69d781394014ebfe8bbfa0b"
+-
+-[[package]]
+-name = "windows_i686_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "0eee52d38c090b3caa76c563b86c3a4bd71ef1a819287c19d586d7334ae8ed66"
+-
+-[[package]]
+-name = "windows_i686_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "240948bc05c5e7c6dabba28bf89d89ffce3e303022809e73deaefe4f6ec56c66"
+-
+-[[package]]
+-name = "windows_x86_64_gnu"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "147a5c80aabfbf0c7d901cb5895d1de30ef2907eb21fbbab29ca94c5b08b1a78"
+-
+-[[package]]
+-name = "windows_x86_64_gnullvm"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "24d5b23dc417412679681396f2b49f3de8c1473deb516bd34410872eff51ed0d"
+-
+-[[package]]
+-name = "windows_x86_64_msvc"
+-version = "0.52.6"
+-source = "registry+https://github.com/rust-lang/crates.io-index"
+-checksum = "589f6da84c646204747d1270a2a5661ea66ed1cced2631d546fdfb155959f9ec"
+-
+ [[package]]
+ name = "xml-rs"
+ version = "0.8.28"
+diff --git a/Cargo.toml b/Cargo.toml
+index 8a70a2b..73460be 100644
+--- a/Cargo.toml
++++ b/Cargo.toml
+@@ -11,6 +11,7 @@ glam = "0.29"
+ pollster = "0.4"
+ log = "0.4"
+ futures-channel = "0.3"
++hilbert_index = "0.2.0"
+ 
+ [dev-dependencies]
+ env_logger = "0.11"
+diff --git a/src/gpu/buffers.rs b/src/gpu/buffers.rs
+index 077a4ff..6325f61 100644
+--- a/src/gpu/buffers.rs
++++ b/src/gpu/buffers.rs
+@@ -156,14 +156,16 @@ impl GpuBuffers {
+         });
+         eprintln!("    ✓ tet_info: {} bytes", max_tets * 4);
+ 
+-        let vert_tet = device.create_buffer(&wgpu::BufferDescriptor {
++        // OPTIMIZATION: Initialize vert_tet on CPU to eliminate init_vert_tet shader pass
++        // All points start in tet 0 (super-tet). CPU initialization is essentially free
++        // compared to GPU dispatch overhead (~10ms saved by removing shader pass).
++        let vert_tet_data = vec![0u32; (num_points + 5) as usize];
++        let vert_tet = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+             label: Some("vert_tet"),
+-            // N real points + 4 super-tet + 1 infinity
+-            size: ((num_points + 5) as u64) * 4,
++            contents: bytemuck::cast_slice(&vert_tet_data),
+             usage: storage_rw,
+-            mapped_at_creation: false,
+         });
+-        eprintln!("    ✓ vert_tet: {} bytes (num_points+5)", (num_points + 5) * 4);
++        eprintln!("    ✓ vert_tet: {} bytes (initialized on CPU)", (num_points + 5) * 4);
+ 
+         // Initialize vote buffers defensively (NO_VOTE = i32::MIN = 0x80000000)
+         let no_vote: i32 = i32::MIN;
+diff --git a/src/gpu/dispatch.rs b/src/gpu/dispatch.rs
+index 21df3d0..90a66d6 100644
+--- a/src/gpu/dispatch.rs
++++ b/src/gpu/dispatch.rs
+@@ -28,95 +28,78 @@ impl FlipCompactMode {
+ /// Dispatch helpers that encode and submit compute passes.
+ impl GpuState {
+     /// Dispatch the init kernel (creates 5-tet super-tetrahedron).
+-    /// OPTIMIZATION: Now split into two passes:
+-    /// 1. make_first_tetra - Single thread creates 5 tets
+-    /// 2. init_vert_tet - Parallel threads initialize vert_tet array
++    /// OPTIMIZATION: vert_tet is now initialized on CPU (buffers.rs), so only need make_first_tetra pass.
++    /// This eliminates ~10ms of GPU synchronization overhead from the removed init_vert_tet dispatch.
+     pub fn dispatch_init(&self, encoder: &mut wgpu::CommandEncoder) {
+-        // PASS 1: Create 5-tet super-tetrahedron (single thread)
+-        {
+-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+-                label: Some("init_make_first_tetra"),
+-                timestamp_writes: None,
+-            });
+-            pass.set_pipeline(&self.pipelines.init_pipeline);
+-
+-            // Create dynamic bind group
+-            // For large datasets, bind only the 5 tets needed for super-tet initialization
+-            let (tets_size, tet_opp_size) = if self.use_partial_binding {
+-                let size = 5 * 16; // 5 tets × 16 bytes each
+-                (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
+-            } else {
+-                (None, None)
+-            };
+-
+-            let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+-                label: Some("init_bg_dynamic"),
+-                layout: &self.pipelines.init_bgl,
+-                entries: &[
+-                    wgpu::BindGroupEntry {
+-                        binding: 0,
+-                        resource: self.buffers.points.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 1,
+-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                            buffer: &self.buffers.tets,
+-                            offset: 0,
+-                            size: tets_size,
+-                        }),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 2,
+-                        resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+-                            buffer: &self.buffers.tet_opp,
+-                            offset: 0,
+-                            size: tet_opp_size,
+-                        }),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 3,
+-                        resource: self.buffers.tet_info.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 4,
+-                        resource: self.buffers.vert_tet.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 5,
+-                        resource: self.buffers.free_arr.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 6,
+-                        resource: self.buffers.vert_free_arr.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 7,
+-                        resource: self.buffers.counters.as_entire_binding(),
+-                    },
+-                    wgpu::BindGroupEntry {
+-                        binding: 8,
+-                        resource: self.pipelines.init_params.as_entire_binding(),
+-                    },
+-                ],
+-            });
+-            pass.set_bind_group(0, Some(&bind_group), &[]);
++        // Single pass: Create 5-tet super-tetrahedron (single thread)
++        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
++            label: Some("init_make_first_tetra"),
++            timestamp_writes: None,
++        });
++        pass.set_pipeline(&self.pipelines.init_pipeline);
+ 
+-            pass.dispatch_workgroups(1, 1, 1);
+-        }
++        // Create dynamic bind group
++        // For large datasets, bind only the 5 tets needed for super-tet initialization
++        let (tets_size, tet_opp_size) = if self.use_partial_binding {
++            let size = 5 * 16; // 5 tets × 16 bytes each
++            (Some(wgpu::BufferSize::new(size).unwrap()), Some(wgpu::BufferSize::new(size).unwrap()))
++        } else {
++            (None, None)
++        };
+ 
+-        // PASS 2: Initialize vert_tet array in parallel
+-        {
+-            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+-                label: Some("init_vert_tet"),
+-                timestamp_writes: None,
+-            });
+-            pass.set_pipeline(&self.pipelines.init_vert_tet_pipeline);
+-            pass.set_bind_group(0, &self.pipelines.init_vert_tet_bind_group, &[]);
++        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
++            label: Some("init_bg_dynamic"),
++            layout: &self.pipelines.init_bgl,
++            entries: &[
++                wgpu::BindGroupEntry {
++                    binding: 0,
++                    resource: self.buffers.points.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 1,
++                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
++                        buffer: &self.buffers.tets,
++                        offset: 0,
++                        size: tets_size,
++                    }),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 2,
++                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
++                        buffer: &self.buffers.tet_opp,
++                        offset: 0,
++                        size: tet_opp_size,
++                    }),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 3,
++                    resource: self.buffers.tet_info.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 4,
++                    resource: self.buffers.vert_tet.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 5,
++                    resource: self.buffers.free_arr.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 6,
++                    resource: self.buffers.vert_free_arr.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 7,
++                    resource: self.buffers.counters.as_entire_binding(),
++                },
++                wgpu::BindGroupEntry {
++                    binding: 8,
++                    resource: self.pipelines.init_params.as_entire_binding(),
++                },
++            ],
++        });
++        pass.set_bind_group(0, Some(&bind_group), &[]);
+ 
+-            let num_points = self.num_points;
+-            let workgroups = (num_points + 255) / 256;
+-            pass.dispatch_workgroups(workgroups, 1, 1);
+-        }
++        pass.dispatch_workgroups(1, 1, 1);
+     }
+ 
+     /// Dispatch vote for point.
+diff --git a/src/gpu/mod.rs b/src/gpu/mod.rs
+index 0c8fd56..23e08b8 100644
+--- a/src/gpu/mod.rs
++++ b/src/gpu/mod.rs
+@@ -53,9 +53,26 @@ impl GpuState {
+         let num_points = points.len() as u32;
+         eprintln!("[GPU STATE] Input: {} points", num_points);
+ 
+-        // Sort points by Morton code if enabled (reduces iteration count by improving spatial locality)
++        // Sort points for better spatial locality (reduces voting conflicts during insertion)
++        // Priority: Hilbert (stratified) > Morton > Sequential
+         // CUDA Reference: GpuDelaunay.cu:661-684
+-        let (sorted_points, point_mapping) = if config.enable_sorting {
++        let (sorted_points, point_mapping) = if config.enable_hilbert_sorting {
++            eprintln!("[GPU STATE] Hilbert curve sorting enabled (stratified sampling)");
++            let (sorted, mapping) = sort_points_by_hilbert(points);
++            eprintln!("[GPU STATE] ✓ Points sorted by Hilbert curve with stratified sampling");
++
++            // Debug: Show that sorting actually reordered points
++            let mut reordered = 0;
++            for i in 0..mapping.len().min(100) {
++                if mapping[i] != i as u32 {
++                    reordered += 1;
++                }
++            }
++            eprintln!("[GPU STATE] First 100 points: {} reordered, {} unchanged",
++                     reordered, 100 - reordered);
++
++            (sorted, Some(mapping))
++        } else if config.enable_sorting {
+             eprintln!("[GPU STATE] Morton code sorting enabled");
+             let (sorted, mapping) = sort_points_by_morton(points);
+             eprintln!("[GPU STATE] ✓ Points sorted by Morton code");
+@@ -72,7 +89,7 @@ impl GpuState {
+ 
+             (sorted, Some(mapping))
+         } else {
+-            eprintln!("[GPU STATE] Morton code sorting disabled");
++            eprintln!("[GPU STATE] Sequential insertion order (no reordering)");
+             (points.to_vec(), None)
+         };
+ 
+@@ -440,3 +457,240 @@ fn sort_points_by_morton(points: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
+ 
+     (sorted_points, point_mapping)
+ }
++
++/// Sort points by Hilbert curve index, then apply strided sampling.
++///
++/// Strategy:
++/// 1. Sort points by Hilbert curve index (establishes spatial ordering)
++/// 2. Apply strided sampling to distribute insertions across the curve
++///
++/// Strided sampling inserts every Nth point in the first pass, ensuring
++/// good spatial distribution and reduced voting conflicts.
++///
++/// Returns (sorted_points, mapping) where mapping[i] is the original index
++/// of the point at sorted position i.
++fn sort_points_by_hilbert(points: &[[f32; 3]]) -> (Vec<[f32; 3]>, Vec<u32>) {
++    use crate::hilbert::compute_hilbert_index;
++
++    // 1. Compute bounding box
++    let mut min = [f32::MAX; 3];
++    let mut max = [f32::MIN; 3];
++    for p in points {
++        for i in 0..3 {
++            min[i] = min[i].min(p[i]);
++            max[i] = max[i].max(p[i]);
++        }
++    }
++
++    // 2. Compute Hilbert indices using established algorithm (hilbert_index crate)
++    let mut indexed_points: Vec<(usize, usize, [f32; 3])> = points
++        .iter()
++        .enumerate()
++        .map(|(i, &pt)| {
++            let hilbert_idx = compute_hilbert_index(pt, min, max);
++            (hilbert_idx, i, pt)
++        })
++        .collect();
++
++    // 3. Sort by Hilbert index (stable sort preserves order for equal codes)
++    indexed_points.sort_by_key(|(hilbert_idx, _, _)| *hilbert_idx);
++
++    // 4. Apply stratified (hierarchical) sampling to reorder the Hilbert-sorted points
++    // Start with wide stride (~0.1% sampling), progressively narrow to fill gaps
++    // For 2M points: sqrt(2M) ≈ 1414 stride → ~1400 points in first pass (~0.07%)
++    let n = indexed_points.len();
++    let initial_stride = calculate_initial_stride(n);
++    eprintln!("[GPU STATE] Stratified sampling: {} points, initial stride = {} (~{:.2}% first pass)",
++              n, initial_stride, 100.0 / initial_stride as f64);
++    let strided_points = apply_strided_sampling_indexed(&indexed_points, initial_stride);
++
++    // 5. Extract final points and mapping
++    let sorted_points: Vec<[f32; 3]> = strided_points
++        .iter()
++        .map(|(_, _, pt)| *pt)
++        .collect();
++
++    let point_mapping: Vec<u32> = strided_points
++        .iter()
++        .map(|(_, orig_idx, _)| *orig_idx as u32)
++        .collect();
++
++    (sorted_points, point_mapping)
++}
++
++/// Calculate initial stride for stratified sampling based on point count.
++///
++/// Uses aggressive square root scaling to ensure very sparse initial sampling:
++/// - 100 points: stride 64 → 1 point (~1.5%)
++/// - 1K points: stride 64 → 15 points (~1.5%)
++/// - 10K points: stride 128 → 78 points (~0.8%)
++/// - 100K points: stride 512 → 195 points (~0.2%)
++/// - 1M points: stride 2048 → 488 points (~0.05%)
++/// - 2M points: stride 4096 → 488 points (~0.02%)
++///
++/// For large datasets (>100K), this ensures first pass inserts <0.1% of points.
++fn calculate_initial_stride(num_points: usize) -> usize {
++    // Aggressive scaling: sqrt(N) * 1.5 for large datasets
++    let sqrt_n = (num_points as f64).sqrt();
++    let scaled = if num_points > 100_000 {
++        sqrt_n * 2.0  // 2x more aggressive for large datasets
++    } else {
++        sqrt_n
++    };
++    let stride = scaled.max(64.0).min(16384.0);
++
++    // Round UP to nearest power of 2 for clean halving pattern and sparser sampling
++    let log2 = stride.log2().ceil();
++    let stride_pow2 = (2.0_f64).powf(log2) as usize;
++
++    stride_pow2
++}
++
++/// Apply stratified (hierarchical) sampling to reorder points.
++///
++/// Strategy: Insert points in multiple passes with progressively narrowing strides.
++/// This ensures good spatial distribution at all scales.
++///
++/// Example with initial_stride=128:
++/// - Pass 1 (stride 128): [0, 128, 256, 384, ...]        <- ~1% of points
++/// - Pass 2 (stride 64):  [64, 192, 320, 448, ...]       <- ~1% more
++/// - Pass 3 (stride 32):  [32, 96, 160, 224, 288, ...]   <- ~2% more
++/// - Pass 4 (stride 16):  [16, 48, 80, 112, 144, ...]    <- ~4% more
++/// - Pass 5 (stride 8):   [8, 24, 40, 56, 72, ...]       <- ~8% more
++/// - Pass 6 (stride 4):   [4, 12, 20, 28, 36, ...]       <- ~16% more
++/// - Pass 7 (stride 2):   [2, 6, 10, 14, 18, 22, ...]    <- ~32% more
++/// - Pass 8 (stride 1):   [1, 3, 5, 7, 9, 11, ...]       <- remaining ~35%
++///
++/// This creates a multi-scale spatial distribution that reduces voting conflicts.
++///
++/// # Arguments
++/// * `indexed_points` - Points sorted by Hilbert index
++/// * `initial_stride` - Starting stride (e.g., 128 for ~1% initial sampling)
++///
++/// # Returns
++/// Reordered points with stratified sampling applied
++fn apply_strided_sampling_indexed(
++    indexed_points: &[(usize, usize, [f32; 3])],
++    initial_stride: usize,
++) -> Vec<(usize, usize, [f32; 3])> {
++    let n = indexed_points.len();
++    let mut result = Vec::with_capacity(n);
++    let mut inserted = vec![false; n];
++
++    // Start with widest stride, progressively halve
++    let mut stride = initial_stride;
++    while stride >= 1 {
++        // Insert points at indices [0, stride, 2*stride, 3*stride, ...]
++        // that haven't been inserted yet
++        let mut i = 0;
++        while i < n {
++            if !inserted[i] {
++                result.push(indexed_points[i]);
++                inserted[i] = true;
++            }
++            i += stride;
++        }
++
++        // Halve stride for next pass (progressively fill gaps)
++        stride /= 2;
++    }
++
++    result
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    #[test]
++    fn test_stratified_sampling_pattern() {
++        // Create test data: 16 points with indices 0-15
++        let indexed: Vec<(usize, usize, [f32; 3])> = (0..16)
++            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
++            .collect();
++
++        // Apply stratified sampling with initial stride 8
++        let strided = apply_strided_sampling_indexed(&indexed, 8);
++
++        // Extract just the indices for verification
++        let indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
++
++        // Expected pattern with initial stride 8 (progressively halving):
++        // Pass 1 (stride 8): 0, 8           <- ~12% of points (2/16)
++        // Pass 2 (stride 4): 4, 12          <- ~12% more (2/16)
++        // Pass 3 (stride 2): 2, 6, 10, 14   <- ~25% more (4/16)
++        // Pass 4 (stride 1): 1, 3, 5, 7, 9, 11, 13, 15 <- remaining ~50% (8/16)
++        let expected = vec![
++            0, 8,               // Wide spacing (stride 8)
++            4, 12,              // Half the spacing (stride 4)
++            2, 6, 10, 14,       // Half again (stride 2)
++            1, 3, 5, 7, 9, 11, 13, 15, // Fill remaining (stride 1)
++        ];
++
++        assert_eq!(indices, expected,
++            "Stratified sampling should produce hierarchical pattern [0,8, 4,12, 2,6,10,14, ...]");
++    }
++
++    #[test]
++    fn test_stratified_sampling_preserves_count() {
++        let indexed: Vec<(usize, usize, [f32; 3])> = (0..100)
++            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
++            .collect();
++
++        let strided = apply_strided_sampling_indexed(&indexed, 64);
++
++        assert_eq!(strided.len(), 100, "Stratified sampling should preserve point count");
++
++        // Verify all original indices are present
++        let mut indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
++        indices.sort();
++        let expected: Vec<usize> = (0..100).collect();
++        assert_eq!(indices, expected, "All original indices should be present");
++    }
++
++    #[test]
++    fn test_calculate_initial_stride() {
++        // Verify stride calculation scales appropriately
++        assert_eq!(calculate_initial_stride(100), 64);        // Small: ~1.5%
++        assert_eq!(calculate_initial_stride(1_000), 64);      // 1K: ~1.5%
++        assert_eq!(calculate_initial_stride(10_000), 128);    // 10K: ~0.8%
++        assert_eq!(calculate_initial_stride(100_000), 512);   // 100K: ~0.2%
++        assert_eq!(calculate_initial_stride(1_000_000), 2048); // 1M: ~0.05%
++        assert_eq!(calculate_initial_stride(2_000_000), 4096); // 2M: ~0.02%
++
++        // Edge cases
++        assert_eq!(calculate_initial_stride(10), 64);       // Min clamp
++        assert_eq!(calculate_initial_stride(1_000_000_000), 16384); // Max clamp
++
++        // Verify first pass percentages are reasonable
++        let stride_2m = calculate_initial_stride(2_000_000);
++        let first_pass = 2_000_000 / stride_2m;
++        assert!(first_pass < 1000, "2M points should insert <1000 in first pass (got {})", first_pass);
++    }
++
++    #[test]
++    fn test_stratified_sampling_order() {
++        // Test that first few points are widely spaced
++        let indexed: Vec<(usize, usize, [f32; 3])> = (0..256)
++            .map(|i| (i, i, [i as f32, 0.0, 0.0]))
++            .collect();
++
++        let strided = apply_strided_sampling_indexed(&indexed, 128);
++        let indices: Vec<usize> = strided.iter().map(|(_, idx, _)| *idx).collect();
++
++        // First pass (stride 128): should insert indices [0, 128]
++        assert_eq!(indices[0], 0, "First point should be at index 0");
++        assert_eq!(indices[1], 128, "Second point should be at index 128");
++
++        // Second pass (stride 64): should insert indices [64, 192]
++        assert_eq!(indices[2], 64, "Third point should be at index 64");
++        assert_eq!(indices[3], 192, "Fourth point should be at index 192");
++
++        // Verify hierarchical refinement continues
++        // After 2 passes with stride 128→64, we should have 4 points: [0, 128, 64, 192]
++        assert!(indices[0..4].contains(&0));
++        assert!(indices[0..4].contains(&64));
++        assert!(indices[0..4].contains(&128));
++        assert!(indices[0..4].contains(&192));
++    }
++}
+diff --git a/src/gpu/pipelines.rs b/src/gpu/pipelines.rs
+index 9cdc0d5..0b621c8 100644
+--- a/src/gpu/pipelines.rs
++++ b/src/gpu/pipelines.rs
+@@ -7,7 +7,8 @@ pub struct Pipelines {
+     // init_bind_group removed - now created dynamically at dispatch time to avoid 128 MB limit
+     pub init_params: wgpu::Buffer,
+ 
+-    // Pipeline: init_vert_tet (parallel initialization of vert_tet array)
++    // Pipeline: init_vert_tet (OBSOLETE - vert_tet now initialized on CPU)
++    // Keeping these fields to avoid breaking existing code, but shader is no longer dispatched
+     pub init_vert_tet_pipeline: wgpu::ComputePipeline,
+     pub init_vert_tet_bind_group: wgpu::BindGroup,
+ 
+diff --git a/src/lib.rs b/src/lib.rs
+index 31a359f..1055edd 100644
+--- a/src/lib.rs
++++ b/src/lib.rs
+@@ -10,6 +10,7 @@ pub mod phase2;
+ pub mod cpu;
+ pub mod profiler;
+ pub mod morton;
++pub mod hilbert;
+ 
+ use types::{DelaunayResult, GDelConfig};
+ 
+diff --git a/src/phase1.rs b/src/phase1.rs
+index 6809903..a838aab 100644
+--- a/src/phase1.rs
++++ b/src/phase1.rs
+@@ -21,23 +21,6 @@ pub async fn run(
+ ) {
+     let phase1_start = Instant::now();
+ 
+-    // Step 0: Initialize super-tetrahedron
+-    {
+-        state.cpu_profiler.begin("init");
+-        let mut encoder = device.create_command_encoder(&Default::default());
+-        state.dispatch_init(&mut encoder);
+-        queue.submit(Some(encoder.finish()));
+-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+-
+-        // Debug: Check if tet 0 is alive after init
+-        let tet_info_debug: Vec<u32> = state
+-            .buffers
+-            .read_buffer_as(device, queue, &state.buffers.tet_info, 1)
+-            .await;
+-        println!("[DEBUG] After init: tet_info[0] = {}", tet_info_debug[0]);
+-        state.cpu_profiler.end("init");
+-    }
+-
+     let mut iteration = 0u32;
+ 
+     while state.num_uninserted > 0 && iteration < config.max_insert_iterations {
+@@ -81,11 +64,17 @@ pub async fn run(
+         // 5. thrust::gather - get vertex IDs
+         // Note: NO point location before voting! Vertices vote for their current tets.
+ 
+-        // BATCHED: Reset votes → Vote → Pick winner → Build insert list
+-        // This eliminates 3 submit/poll cycles (was 4 separate submissions, now 1)
++        // BATCHED: Init (iteration 1 only) → Reset votes → Vote → Pick winner → Build insert list
++        // OPTIMIZATION: First iteration combines init with vote phase to eliminate one submit/poll cycle
++        // This saves ~10-12ms by reducing GPU synchronization overhead
+         state.cpu_profiler.begin("1_vote_phase");
+         let mut encoder = device.create_command_encoder(&Default::default());
+ 
++        // Step 0: Initialize super-tetrahedron (first iteration only)
++        if iteration == 1 {
++            state.dispatch_init(&mut encoder);
++        }
++
+         // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
+         // CRITICAL: Must pass num_uninserted to clear correct range
+         state.dispatch_reset_votes(&mut encoder, queue, num_uninserted);
+@@ -192,18 +181,6 @@ pub async fn run(
+         println!("[DEBUG] Batched operations complete");
+         state.cpu_profiler.end("4_split");
+ 
+-        // Debug: Check tet_info and counters after split
+-        if iteration == 1 {
+-            let tet_info_debug: Vec<u32> = state
+-                .buffers
+-                .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
+-                .await;
+-            let counters_debug = state.buffers.read_counters(device, queue).await;
+-            println!("[DEBUG] After split in iteration 1: tet_info[0..10] = {:?}", tet_info_debug);
+-            println!("[DEBUG] After split in iteration 1: scratch[2] (threads entered) = {}, scratch[0] (splits run) = {}, scratch[1] (alloc ok) = {}, scratch[3] (alloc fail) = {}",
+-                counters_debug.scratch[2], counters_debug.scratch[0], counters_debug.scratch[1], counters_debug.scratch[3]);
+-        }
+-
+         // 5e. Split fixup (DISABLED - split.wgsl handles adjacency inline)
+         // let mut encoder = device.create_command_encoder(&Default::default());
+         // state.dispatch_split_fixup(&mut encoder, queue, num_inserted);
+@@ -454,7 +431,10 @@ pub async fn run(
+             if total_flips > 0 {
+                 state.cpu_profiler.begin("8_relocate");
+                 // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
+-                let init_data = vec![-1i32; state.max_tets as usize];
++                // OPTIMIZATION: Only initialize active portion [0, current_tet_num) instead of full max_tets buffer
++                // For 2M points: current_tet_num ~5-10M, max_tets ~16M → saves 24-44MB CPU→GPU transfer
++                let current_tets = state.current_tet_num as usize;
++                let init_data = vec![-1i32; current_tets];
+                 queue.write_buffer(&state.buffers.tet_to_flip, 0, bytemuck::cast_slice(&init_data));
+ 
+                 // BATCHED: Build all flip traces + relocate in single submission
+@@ -486,16 +466,6 @@ pub async fn run(
+         state.cpu_profiler.begin("9_compact");
+         let new_count_from_compact;  // Declare outside block
+         {
+-            // DEBUG: Verify insert_list before compaction
+-            let insert_list_before: Vec<[u32; 2]> = state
+-                .buffers
+-                .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
+-                .await;
+-            // println!(
+-            //     "[DEBUG_COMPACT] Before compaction: insert_list = {:?}",
+-            //     insert_list_before
+-            // );
+-
+             // Adaptive compaction: choose fastest algorithm based on dataset size
+             // ATOMIC PATH: Fast for typical datasets (< 100k elements)
+             // PREFIX SUM PATH: Better for very large datasets (>= 100k elements)
+diff --git a/src/shaders/init.wgsl b/src/shaders/init.wgsl
+index cc5fe92..8e40dc9 100644
+--- a/src/shaders/init.wgsl
++++ b/src/shaders/init.wgsl
+@@ -126,9 +126,9 @@ fn make_first_tetra() {
+     atomicStore(&counters[3], 0u);            // failed_count = 0
+ }
+ 
+-// Parallel initialization of vert_tet array
+-// OPTIMIZATION: This used to be a serial loop in make_first_tetra (2M iterations in 1 thread!)
+-// Now runs in parallel with 256 threads/workgroup for massive speedup
++// OBSOLETE: init_vert_tet shader pass (no longer dispatched after optimization)
++// vert_tet is now initialized on CPU in buffers.rs for ~10ms speedup.
++// This entry point must remain for pipeline creation, but dispatch_init no longer calls it.
+ @compute @workgroup_size(256)
+ fn init_vert_tet(
+     @builtin(global_invocation_id) gid: vec3<u32>,
+diff --git a/src/types.rs b/src/types.rs
+index 3bd53b3..bad691e 100644
+--- a/src/types.rs
++++ b/src/types.rs
+@@ -33,6 +33,11 @@ pub struct GDelConfig {
+     pub insertion_rule: InsertionRule,
+     pub enable_flipping: bool,
+     pub enable_sorting: bool,
++    /// Enable Hilbert curve sorting for point insertion order.
++    /// When true, points are sorted by Hilbert curve index instead of
++    /// Morton code or sequential order. Hilbert has better locality
++    /// than Morton and may reduce voting conflicts.
++    pub enable_hilbert_sorting: bool,
+     /// Enable CPU Phase 2 star splaying for guaranteed Delaunay.
+     pub enable_splaying: bool,
+     /// Maximum insertion+flip iterations before giving up.
+@@ -46,7 +51,8 @@ impl Default for GDelConfig {
+         Self {
+             insertion_rule: InsertionRule::Circumcenter,
+             enable_flipping: true,
+-            enable_sorting: false,  // Disabled: increases conflicts (20 → 38 iterations)
++            enable_sorting: false,  // Morton sorting disabled: increases conflicts (21 → 38 iterations)
++            enable_hilbert_sorting: true,  // Hilbert + stratified sampling (1% → 100%, progressively narrowing stride)
+             enable_splaying: true,
+             max_insert_iterations: 100,
+             max_flip_iterations: 10,

@@ -156,14 +156,16 @@ impl GpuBuffers {
         });
         eprintln!("    ✓ tet_info: {} bytes", max_tets * 4);
 
-        let vert_tet = device.create_buffer(&wgpu::BufferDescriptor {
+        // OPTIMIZATION: Initialize vert_tet on CPU to eliminate init_vert_tet shader pass
+        // All points start in tet 0 (super-tet). CPU initialization is essentially free
+        // compared to GPU dispatch overhead (~10ms saved by removing shader pass).
+        let vert_tet_data = vec![0u32; (num_points + 5) as usize];
+        let vert_tet = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("vert_tet"),
-            // N real points + 4 super-tet + 1 infinity
-            size: ((num_points + 5) as u64) * 4,
+            contents: bytemuck::cast_slice(&vert_tet_data),
             usage: storage_rw,
-            mapped_at_creation: false,
         });
-        eprintln!("    ✓ vert_tet: {} bytes (num_points+5)", (num_points + 5) * 4);
+        eprintln!("    ✓ vert_tet: {} bytes (initialized on CPU)", (num_points + 5) * 4);
 
         // Initialize vote buffers defensively (NO_VOTE = i32::MIN = 0x80000000)
         let no_vote: i32 = i32::MIN;

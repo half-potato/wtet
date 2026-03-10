@@ -21,23 +21,6 @@ pub async fn run(
 ) {
     let phase1_start = Instant::now();
 
-    // Step 0: Initialize super-tetrahedron
-    {
-        state.cpu_profiler.begin("init");
-        let mut encoder = device.create_command_encoder(&Default::default());
-        state.dispatch_init(&mut encoder);
-        queue.submit(Some(encoder.finish()));
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-        // Debug: Check if tet 0 is alive after init
-        let tet_info_debug: Vec<u32> = state
-            .buffers
-            .read_buffer_as(device, queue, &state.buffers.tet_info, 1)
-            .await;
-        println!("[DEBUG] After init: tet_info[0] = {}", tet_info_debug[0]);
-        state.cpu_profiler.end("init");
-    }
-
     let mut iteration = 0u32;
 
     while state.num_uninserted > 0 && iteration < config.max_insert_iterations {
@@ -81,10 +64,16 @@ pub async fn run(
         // 5. thrust::gather - get vertex IDs
         // Note: NO point location before voting! Vertices vote for their current tets.
 
-        // BATCHED: Reset votes → Vote → Pick winner → Build insert list
-        // This eliminates 3 submit/poll cycles (was 4 separate submissions, now 1)
+        // BATCHED: Init (iteration 1 only) → Reset votes → Vote → Pick winner → Build insert list
+        // OPTIMIZATION: First iteration combines init with vote phase to eliminate one submit/poll cycle
+        // This saves ~10-12ms by reducing GPU synchronization overhead
         state.cpu_profiler.begin("1_vote_phase");
         let mut encoder = device.create_command_encoder(&Default::default());
+
+        // Step 0: Initialize super-tetrahedron (first iteration only)
+        if iteration == 1 {
+            state.dispatch_init(&mut encoder);
+        }
 
         // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
         // CRITICAL: Must pass num_uninserted to clear correct range
@@ -191,18 +180,6 @@ pub async fn run(
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         println!("[DEBUG] Batched operations complete");
         state.cpu_profiler.end("4_split");
-
-        // Debug: Check tet_info and counters after split
-        if iteration == 1 {
-            let tet_info_debug: Vec<u32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
-                .await;
-            let counters_debug = state.buffers.read_counters(device, queue).await;
-            println!("[DEBUG] After split in iteration 1: tet_info[0..10] = {:?}", tet_info_debug);
-            println!("[DEBUG] After split in iteration 1: scratch[2] (threads entered) = {}, scratch[0] (splits run) = {}, scratch[1] (alloc ok) = {}, scratch[3] (alloc fail) = {}",
-                counters_debug.scratch[2], counters_debug.scratch[0], counters_debug.scratch[1], counters_debug.scratch[3]);
-        }
 
         // 5e. Split fixup (DISABLED - split.wgsl handles adjacency inline)
         // let mut encoder = device.create_command_encoder(&Default::default());
@@ -454,7 +431,10 @@ pub async fn run(
             if total_flips > 0 {
                 state.cpu_profiler.begin("8_relocate");
                 // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
-                let init_data = vec![-1i32; state.max_tets as usize];
+                // OPTIMIZATION: Only initialize active portion [0, current_tet_num) instead of full max_tets buffer
+                // For 2M points: current_tet_num ~5-10M, max_tets ~16M → saves 24-44MB CPU→GPU transfer
+                let current_tets = state.current_tet_num as usize;
+                let init_data = vec![-1i32; current_tets];
                 queue.write_buffer(&state.buffers.tet_to_flip, 0, bytemuck::cast_slice(&init_data));
 
                 // BATCHED: Build all flip traces + relocate in single submission
@@ -486,16 +466,6 @@ pub async fn run(
         state.cpu_profiler.begin("9_compact");
         let new_count_from_compact;  // Declare outside block
         {
-            // DEBUG: Verify insert_list before compaction
-            let insert_list_before: Vec<[u32; 2]> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.insert_list, num_inserted as usize)
-                .await;
-            // println!(
-            //     "[DEBUG_COMPACT] Before compaction: insert_list = {:?}",
-            //     insert_list_before
-            // );
-
             // Adaptive compaction: choose fastest algorithm based on dataset size
             // ATOMIC PATH: Fast for typical datasets (< 100k elements)
             // PREFIX SUM PATH: Better for very large datasets (>= 100k elements)

@@ -7,7 +7,8 @@ pub struct Pipelines {
     // init_bind_group removed - now created dynamically at dispatch time to avoid 128 MB limit
     pub init_params: wgpu::Buffer,
 
-    // Pipeline: init_vert_tet (parallel initialization of vert_tet array)
+    // Pipeline: init_vert_tet (OBSOLETE - vert_tet now initialized on CPU)
+    // Keeping these fields to avoid breaking existing code, but shader is no longer dispatched
     pub init_vert_tet_pipeline: wgpu::ComputePipeline,
     pub init_vert_tet_bind_group: wgpu::BindGroup,
 

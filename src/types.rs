@@ -33,6 +33,11 @@ pub struct GDelConfig {
     pub insertion_rule: InsertionRule,
     pub enable_flipping: bool,
     pub enable_sorting: bool,
+    /// Enable Hilbert curve sorting for point insertion order.
+    /// When true, points are sorted by Hilbert curve index instead of
+    /// Morton code or sequential order. Hilbert has better locality
+    /// than Morton and may reduce voting conflicts.
+    pub enable_hilbert_sorting: bool,
     /// Enable CPU Phase 2 star splaying for guaranteed Delaunay.
     pub enable_splaying: bool,
     /// Maximum insertion+flip iterations before giving up.
@@ -46,7 +51,8 @@ impl Default for GDelConfig {
         Self {
             insertion_rule: InsertionRule::Circumcenter,
             enable_flipping: true,
-            enable_sorting: false,  // Disabled: increases conflicts (20 → 38 iterations)
+            enable_sorting: false,  // Morton sorting disabled: increases conflicts (21 → 38 iterations)
+            enable_hilbert_sorting: false,  // Hilbert + stratified sampling (1% → 100%, progressively narrowing stride)
             enable_splaying: true,
             max_insert_iterations: 100,
             max_flip_iterations: 10,
