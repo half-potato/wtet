@@ -32,13 +32,9 @@ const TET_VI_AS_SEEN_FROM: array<vec3<u32>, 4> = array<vec3<u32>, 4>(
     vec3<u32>(0u, 1u, 2u), // seen from vertex 3
 );
 
-// CRITICAL FIX: Helper function to avoid variable array indexing (causes SIGSEGV)
-// Cannot use TET_VI_AS_SEEN_FROM[variable] - must use explicit branches
+// Direct array indexing (now supported in wgpu 28+)
 fn get_tet_vi_as_seen_from(vi: u32) -> vec3<u32> {
-    if vi == 0u { return vec3<u32>(1u, 3u, 2u); }
-    else if vi == 1u { return vec3<u32>(0u, 2u, 3u); }
-    else if vi == 2u { return vec3<u32>(0u, 3u, 1u); }
-    else { return vec3<u32>(0u, 1u, 2u); }
+    return TET_VI_AS_SEEN_FROM[vi];
 }
 
 fn decode_opp_tet(opp: u32) -> u32 {
@@ -589,20 +585,18 @@ fn check_delaunay_exact(
 
         // Go around bottom-top tetra, check 3 sides
         for (var i = 0u; i < 3u; i++) {
-            // Avoid dynamic vector and array indexing
-            let ord_vi_elem = select(bot_ord_vi.x, select(bot_ord_vi.y, bot_ord_vi.z, i == 2u), i >= 1u);
-            // CRITICAL FIX: Cannot use TET_VI_AS_SEEN_FROM[variable] - causes SIGSEGV
+            // Direct indexing (now supported in wgpu 28+)
+            let ord_vi_elem = bot_ord_vi[i];
             let fv = get_tet_vi_as_seen_from(ord_vi_elem);
 
-            // Extract bot_p elements using select to avoid dynamic array indexing
-            let p0 = select(select(bot_p[0], bot_p[1], fv.x == 1u), select(bot_p[2], bot_p[3], fv.x == 3u), fv.x >= 2u);
-            let p1 = select(select(bot_p[0], bot_p[1], fv.y == 1u), select(bot_p[2], bot_p[3], fv.y == 3u), fv.y >= 2u);
-            let p2 = select(select(bot_p[0], bot_p[1], fv.z == 1u), select(bot_p[2], bot_p[3], fv.z == 3u), fv.z >= 2u);
+            let p0 = bot_p[fv.x];
+            let p1 = bot_p[fv.y];
+            let p2 = bot_p[fv.z];
 
             // Extract vertex indices for SoS
-            let va = select(select(bot_tet.x, bot_tet.y, fv.x == 1u), select(bot_tet.z, bot_tet.w, fv.x == 3u), fv.x >= 2u);
-            let vb = select(select(bot_tet.x, bot_tet.y, fv.y == 1u), select(bot_tet.z, bot_tet.w, fv.y == 3u), fv.y >= 2u);
-            let vc = select(select(bot_tet.x, bot_tet.y, fv.z == 1u), select(bot_tet.z, bot_tet.w, fv.z == 3u), fv.z >= 2u);
+            let va = bot_tet[fv.x];
+            let vb = bot_tet[fv.y];
+            let vc = bot_tet[fv.z];
 
             // Use exact orient3d with SoS
             let ort = orient3d_with_sos(p0, p1, p2, top_p, va, vb, vc, top_vert);

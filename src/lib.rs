@@ -8,6 +8,7 @@ pub mod gpu;
 pub mod phase1;
 pub mod phase2;
 pub mod cpu;
+pub mod profiler;
 
 use types::{DelaunayResult, GDelConfig};
 

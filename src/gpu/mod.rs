@@ -4,6 +4,7 @@ pub mod dispatch;
 
 use std::collections::HashMap;
 use crate::types::{*, MEAN_VERTEX_DEGREE};
+use crate::profiler::{GpuProfiler, CpuProfiler};
 use buffers::GpuBuffers;
 use pipelines::Pipelines;
 
@@ -26,6 +27,12 @@ pub struct GpuState {
     pub use_partial_binding: bool,
     /// Device reference for creating dynamic bind groups
     pub device: wgpu::Device,
+    /// GPU timestamp period (nanoseconds per tick)
+    pub timestamp_period: f32,
+    /// GPU profiler for timing GPU operations
+    pub gpu_profiler: Option<GpuProfiler>,
+    /// CPU profiler for timing CPU-side operations
+    pub cpu_profiler: CpuProfiler,
 }
 
 impl GpuState {
@@ -113,6 +120,16 @@ impl GpuState {
         // All real points start as uninserted
         let uninserted: Vec<u32> = (0..num_points).collect();
 
+        // Initialize profilers
+        let timestamp_period = _queue.get_timestamp_period();
+        let gpu_profiler = if device.features().contains(wgpu::Features::TIMESTAMP_QUERY) {
+            Some(GpuProfiler::new(device, 2048)) // 2048 timestamps = 1024 scopes
+        } else {
+            eprintln!("[PROFILER] TIMESTAMP_QUERY not supported, GPU profiling disabled");
+            None
+        };
+        let cpu_profiler = CpuProfiler::new();
+
         eprintln!("[GPU STATE] ✓ GpuState initialization complete\n");
 
         Self {
@@ -126,6 +143,9 @@ impl GpuState {
             max_flips: max_tets / 2, // CUDA allocates TetMax/2 flip items
             use_partial_binding,
             device: device.clone(),
+            timestamp_period,
+            gpu_profiler,
+            cpu_profiler,
         }
     }
 

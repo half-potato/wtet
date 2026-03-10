@@ -182,7 +182,7 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {
             label: Some("test"),
-            required_features: wgpu::Features::SUBGROUP,  // Required for prefix_sum.wgsl
+            required_features: wgpu::Features::SUBGROUP | wgpu::Features::TIMESTAMP_QUERY,  // Required for prefix_sum.wgsl + profiling
             required_limits: limits,
             memory_hints: Default::default(),
             experimental_features: wgpu::ExperimentalFeatures::disabled(),

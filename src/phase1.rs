@@ -11,6 +11,7 @@
 
 use crate::gpu::GpuState;
 use crate::types::GDelConfig;
+use std::time::Instant;
 
 pub async fn run(
     device: &wgpu::Device,
@@ -18,8 +19,11 @@ pub async fn run(
     state: &mut GpuState,
     config: &GDelConfig,
 ) {
+    let phase1_start = Instant::now();
+
     // Step 0: Initialize super-tetrahedron
     {
+        state.cpu_profiler.begin("init");
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_init(&mut encoder);
         queue.submit(Some(encoder.finish()));
@@ -31,11 +35,13 @@ pub async fn run(
             .read_buffer_as(device, queue, &state.buffers.tet_info, 1)
             .await;
         println!("[DEBUG] After init: tet_info[0] = {}", tet_info_debug[0]);
+        state.cpu_profiler.end("init");
     }
 
     let mut iteration = 0u32;
 
     while !state.uninserted.is_empty() && iteration < config.max_insert_iterations {
+        let iter_start = Instant::now();
         iteration += 1;
         let num_uninserted = state.uninserted.len() as u32;
 
@@ -81,6 +87,7 @@ pub async fn run(
 
         // BATCHED: Reset votes → Vote → Pick winner → Build insert list
         // This eliminates 3 submit/poll cycles (was 4 separate submissions, now 1)
+        state.cpu_profiler.begin("vote_batch");
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
@@ -98,6 +105,7 @@ pub async fn run(
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        state.cpu_profiler.end("vote_batch");
 
         // Debug: Read vert_sphere and tet_vote after voting
         if iteration == 2 {
@@ -157,6 +165,7 @@ pub async fn run(
         // Note: Reset scratch counters inline before dispatching
         queue.write_buffer(&state.buffers.counters, 16, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
 
+        state.cpu_profiler.begin("split_batch");
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // Expand tetrahedron list to make room for new insertions
@@ -176,6 +185,7 @@ pub async fn run(
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         println!("[DEBUG] Batched operations complete");
+        state.cpu_profiler.end("split_batch");
 
         // Debug: Check tet_info and counters after split
         if iteration == 1 {
@@ -199,6 +209,7 @@ pub async fn run(
 
         // 6. Flip checking (optional, iterative) - TWO-PHASE FLIPPING
         if config.enable_flipping {
+            state.cpu_profiler.begin("flipping");
             // CUDA two-phase flipping:
             // Phase 1: doFlippingLoop(Fast) - f32 predicates for 99%+ of cases
             // Phase 2: markSpecialTets() → doFlippingLoop(Exact) - DD + SoS for degenerate cases
@@ -428,10 +439,12 @@ pub async fn run(
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
             }
+            state.cpu_profiler.end("flipping");
         }
 
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
         // GPU-accelerated compaction (FLAW #2 fix)
+        state.cpu_profiler.begin("compact");
         {
             // DEBUG: Verify insert_list before compaction
             let insert_list_before: Vec<[u32; 2]> = state
@@ -489,6 +502,11 @@ pub async fn run(
         // Update CPU state
         state.uninserted = new_uninserted;
 
+        state.cpu_profiler.end("compact");
+
+        let iter_duration = iter_start.elapsed();
+        eprintln!("[TIMING] Iteration {} completed in {:.3} ms", iteration, iter_duration.as_secs_f64() * 1000.0);
+
         println!(
             "[DEBUG] After iteration {}: {} points remaining (GPU compacted)",
             iteration,
@@ -516,6 +534,17 @@ pub async fn run(
             "[INFO] Phase 1 complete after {} iterations, all points inserted",
             iteration
         );
+    }
+
+    // Print profiling summary
+    let phase1_duration = phase1_start.elapsed();
+    eprintln!("\n[TIMING] Phase 1 total: {:.2} seconds", phase1_duration.as_secs_f64());
+    state.cpu_profiler.print_summary();
+
+    // Collect GPU profiling data if enabled
+    if let Some(ref mut gpu_profiler) = state.gpu_profiler {
+        gpu_profiler.collect(device, queue, state.timestamp_period).await;
+        gpu_profiler.print_summary();
     }
 }
 

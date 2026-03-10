@@ -52,34 +52,14 @@ const SPLIT_NEXT: array<array<u32, 2>, 11> = array(
     array(4u, 0u),    // 10
 );
 
-// CRITICAL FIX: Helper functions to avoid variable array indexing (causes SIGSEGV)
-// Cannot use SPLIT_FACES[variable] or SPLIT_NEXT[variable] - must use explicit branches
+// Direct array indexing (now supported in wgpu 28+)
 fn get_split_face(face: u32) -> array<u32, 3> {
-    if face == 0u { return array(0u, 1u, 4u); }
-    else if face == 1u { return array(0u, 3u, 4u); }
-    else if face == 2u { return array(0u, 2u, 4u); }
-    else if face == 3u { return array(2u, 3u, 4u); }
-    else if face == 4u { return array(1u, 3u, 4u); }
-    else if face == 5u { return array(1u, 2u, 4u); }
-    else if face == 6u { return array(2u, 3u, 4u); }
-    else if face == 7u { return array(1u, 3u, 2u); }
-    else if face == 8u { return array(0u, 2u, 3u); }
-    else if face == 9u { return array(0u, 3u, 1u); }
-    else { return array(0u, 1u, 2u); } // face == 10
+    return SPLIT_FACES[face];
 }
 
 fn get_split_next(face: u32, orient_positive: bool) -> u32 {
-    if face == 0u { return select(2u, 1u, orient_positive); }
-    else if face == 1u { return select(4u, 3u, orient_positive); }
-    else if face == 2u { return select(6u, 5u, orient_positive); }
-    else if face == 3u { return select(8u, 7u, orient_positive); }
-    else if face == 4u { return select(7u, 9u, orient_positive); }
-    else if face == 5u { return select(10u, 7u, orient_positive); }
-    else if face == 6u { return select(8u, 7u, orient_positive); }
-    else if face == 7u { return select(0u, 1u, orient_positive); }
-    else if face == 8u { return select(0u, 2u, orient_positive); }
-    else if face == 9u { return select(0u, 3u, orient_positive); }
-    else { return select(0u, 4u, orient_positive); } // face == 10
+    let next_pair = SPLIT_NEXT[face];
+    return select(next_pair[1], next_pair[0], orient_positive);
 }
 
 // --- Double-Double Arithmetic for Exact Predicates ---
