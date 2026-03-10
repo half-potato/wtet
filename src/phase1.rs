@@ -456,6 +456,7 @@ pub async fn run(
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
         // GPU-accelerated compaction (FLAW #2 fix)
         state.cpu_profiler.begin("9_compact");
+        let new_count_from_compact;  // Declare outside block
         {
             // DEBUG: Verify insert_list before compaction
             let insert_list_before: Vec<[u32; 2]> = state
@@ -467,9 +468,11 @@ pub async fn run(
                 insert_list_before
             );
 
-            // Dispatch GPU compaction (2-pass: count, then scatter)
-            // Returns encoder after pass 2 for adding buffer copies
-            let mut encoder = state.dispatch_compact_vertex_arrays(device, queue, num_uninserted, num_inserted);
+            // Dispatch GPU compaction (mark → invert → CPU prefix sum → scatter)
+            // Eliminates O(N²) linear search bottleneck!
+            // Returns (encoder, new_count) - encoder for buffer copies, new_count for tracking
+            let (mut encoder, new_count) = state.dispatch_compact_vertex_arrays(device, queue, num_uninserted, num_inserted).await;
+            new_count_from_compact = new_count;  // Assign to outer variable
 
             // Copy compacted results from temp buffers back to main buffers
             encoder.copy_buffer_to_buffer(
@@ -491,19 +494,11 @@ pub async fn run(
             device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         }
 
-        // Read back compacted count only (uninserted array stays on GPU)
-        let all_counters = state.buffers.read_counters(device, queue).await;
-        let new_count = all_counters.free_count; // counter[0]
+        // Use new_count from compaction (no need to read counters anymore)
+        let new_count = new_count_from_compact;
         println!(
             "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
             iteration, num_uninserted, num_inserted, new_count
-        );
-        println!(
-            "[DEBUG_COMPACT] All counters: free={}, active={}, inserted={}, failed={}",
-            all_counters.free_count,
-            all_counters.active_count,
-            all_counters.inserted_count,
-            all_counters.failed_count
         );
 
         // Update CPU state (count only, array stays on GPU)

@@ -1214,58 +1214,112 @@ impl GpuState {
     ///
     /// CRITICAL: This function submits the encoder internally between passes to ensure
     /// params buffer writes are properly synchronized. Returns a new encoder for the caller.
-    pub fn dispatch_compact_vertex_arrays(
+    pub async fn dispatch_compact_vertex_arrays(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
         num_uninserted: u32,
         num_inserted: u32,
-    ) -> wgpu::CommandEncoder {
-        // CRITICAL: Reset counters[0] and counters[1] to zero before atomic operations!
-        queue.write_buffer(&self.buffers.counters, 0, bytemuck::cast_slice(&[0u32, 0u32]));
+    ) -> (wgpu::CommandEncoder, u32) {
+        // New algorithm: mark → invert → CPU_prefix_sum → scatter
+        // Eliminates O(N²) linear search!
+        // CPU prefix sum is O(N) which is MUCH faster than O(N×M) linear search
+        // (GPU prefix sum integration can be added later for further optimization)
 
-        // Pass 1: Count vertices NOT in insert_list
+        // Zero-initialize compaction_flags buffer
+        let zero_flags = vec![0u32; num_uninserted as usize];
+        queue.write_buffer(
+            &self.buffers.compaction_flags,
+            0,
+            bytemuck::cast_slice(&zero_flags),
+        );
+
+        // Update params for all passes
         queue.write_buffer(
             &self.pipelines.compact_vertex_arrays_params,
             0,
             bytemuck::cast_slice(&[num_uninserted, num_inserted, 0u32, 0u32]),
         );
 
-        let mut encoder1 = device.create_command_encoder(&Default::default());
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("compact_vertex_arrays"),
+        });
+
+        // Pass 1: Mark inserted positions
         {
-            let mut pass = encoder1.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compact_vertex_arrays_pass1"),
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_mark_inserted"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
-            pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+            pass.set_pipeline(&self.pipelines.compact_mark_inserted_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_mark_inserted_bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(num_inserted, 256), 1, 1);
+        }
+
+        // Pass 2: Invert flags (inserted→0, not_inserted→1)
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_invert_flags"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.compact_invert_flags_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_invert_flags_bind_group), &[]);
             pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
         }
 
-        // CRITICAL: Submit pass 1 BEFORE writing params for pass 2
-        queue.submit(Some(encoder1.finish()));
+        // Submit passes 1-2 and read back flags
+        queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-        // Pass 2: Compact non-inserted vertices to temp buffers
+        // Pass 3: CPU prefix sum on flags → compact_map
+        let flags: Vec<u32> = self.buffers.read_buffer_as(
+            device,
+            queue,
+            &self.buffers.compaction_flags,
+            num_uninserted as usize,
+        ).await;
+
+        // DEBUG: Check flags
+        let num_ones = flags.iter().filter(|&&x| x == 1).count();
+        let num_zeros = flags.iter().filter(|&&x| x == 0).count();
+        eprintln!("[COMPACT_DEBUG] Flags: {} ones (keep), {} zeros (exclude), total={}",
+                  num_ones, num_zeros, flags.len());
+        if num_uninserted <= 10 {
+            eprintln!("[COMPACT_DEBUG] Flags: {:?}", flags);
+        }
+
+        // Exclusive prefix sum: compact_map[i] = sum(flags[0..i])
+        let mut compact_map = vec![0u32; num_uninserted as usize];
+        let mut sum = 0u32;
+        for i in 0..num_uninserted as usize {
+            compact_map[i] = sum;
+            sum += flags[i];
+        }
+
+        eprintln!("[COMPACT_DEBUG] Prefix sum result: new_count={}", sum);
+
+        // Upload compact_map to prefix_sum_data buffer (reuse existing buffer)
         queue.write_buffer(
-            &self.pipelines.compact_vertex_arrays_params,
+            &self.buffers.prefix_sum_data,
             0,
-            bytemuck::cast_slice(&[num_uninserted, num_inserted, 1u32, 0u32]),
+            bytemuck::cast_slice(&compact_map),
         );
 
+        // Pass 4: Scatter non-inserted vertices using compact map
         let mut encoder2 = device.create_command_encoder(&Default::default());
         {
             let mut pass = encoder2.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                label: Some("compact_vertex_arrays_pass2"),
+                label: Some("compact_scatter"),
                 timestamp_writes: None,
             });
-            pass.set_pipeline(&self.pipelines.compact_vertex_arrays_pipeline);
-            pass.set_bind_group(0, Some(&self.pipelines.compact_vertex_arrays_bind_group), &[]);
+            pass.set_pipeline(&self.pipelines.compact_scatter_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_scatter_bind_group), &[]);
             pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
         }
 
-        // Return encoder2 for caller to add buffer copies before final submit
-        encoder2
+        // Return encoder and new_count for caller
+        // new_count = number of vertices remaining after compaction
+        (encoder2, sum)
     }
 
     /// Dispatch relocate points fast.

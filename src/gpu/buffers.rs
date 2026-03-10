@@ -33,6 +33,8 @@ pub struct GpuBuffers {
     pub uninserted_temp: wgpu::Buffer,
     /// Temporary buffer for vert_tet compaction: u32 × N
     pub vert_tet_temp: wgpu::Buffer,
+    /// Compaction flags workspace: u32 × N (for prefix-sum-based compaction)
+    pub compaction_flags: wgpu::Buffer,
     /// Insert list: vec2<u32> × N (tet_idx, vert_idx pairs)
     pub insert_list: wgpu::Buffer,
     /// Tet to vertex mapping: u32 × max_tets (INVALID if not splitting)
@@ -262,6 +264,13 @@ impl GpuBuffers {
 
         let vert_tet_temp = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("vert_tet_temp"),
+            size: (num_points as u64) * 4,
+            usage: storage_rw,
+            mapped_at_creation: false,
+        });
+
+        let compaction_flags = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("compaction_flags"),
             size: (num_points as u64) * 4,
             usage: storage_rw,
             mapped_at_creation: false,
@@ -524,6 +533,7 @@ impl GpuBuffers {
             uninserted,
             uninserted_temp,
             vert_tet_temp,
+            compaction_flags,
             insert_list,
             tet_to_vert,
             tet_split_map,

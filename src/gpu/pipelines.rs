@@ -78,9 +78,13 @@ pub struct Pipelines {
     pub compact_if_negative_bind_group: wgpu::BindGroup,
     pub compact_if_negative_params: wgpu::Buffer,
 
-    // Pipeline: compact vertex arrays
-    pub compact_vertex_arrays_pipeline: wgpu::ComputePipeline,
-    pub compact_vertex_arrays_bind_group: wgpu::BindGroup,
+    // Pipeline: compact vertex arrays (prefix-sum-based, 3 passes)
+    pub compact_mark_inserted_pipeline: wgpu::ComputePipeline,
+    pub compact_mark_inserted_bind_group: wgpu::BindGroup,
+    pub compact_invert_flags_pipeline: wgpu::ComputePipeline,
+    pub compact_invert_flags_bind_group: wgpu::BindGroup,
+    pub compact_scatter_pipeline: wgpu::ComputePipeline,
+    pub compact_scatter_bind_group: wgpu::BindGroup,
     pub compact_vertex_arrays_params: wgpu::Buffer,
 
     // Pipeline: relocate points fast
@@ -1033,47 +1037,111 @@ impl Pipelines {
             cache: None,
         });
 
-        // --- compact_vertex_arrays ---
+        // --- compact_vertex_arrays (prefix-sum-based, 3 passes) ---
         let compact_vertex_arrays_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("compact_vertex_arrays.wgsl"),
-            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_vertex_arrays.wgsl").into()),
+            label: Some("compact_vertex_arrays_new.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_vertex_arrays_new.wgsl").into()),
         });
         let compact_vertex_arrays_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
-        let compact_vertex_arrays_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("compact_vertex_arrays_bgl"),
+
+        // Pass 1: mark_inserted
+        let compact_mark_inserted_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_mark_inserted_bgl"),
+            entries: &[
+                storage_ro_entry(2),  // insert_list
+                storage_rw_entry(5),  // flags
+                uniform_entry(8),     // params
+            ],
+        });
+        let compact_mark_inserted_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_mark_inserted_bg"),
+            layout: &compact_mark_inserted_bgl,
+            entries: &[
+                buf_entry(2, &bufs.insert_list),
+                buf_entry(5, &bufs.compaction_flags),
+                buf_entry(8, &compact_vertex_arrays_params),
+            ],
+        });
+        let compact_mark_inserted_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_mark_inserted_pl"),
+            bind_group_layouts: &[&compact_mark_inserted_bgl],
+            immediate_size: 0,
+        });
+        let compact_mark_inserted_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_mark_inserted"),
+            layout: Some(&compact_mark_inserted_pl),
+            module: &compact_vertex_arrays_shader,
+            entry_point: Some("mark_inserted"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Pass 2: invert_flags
+        let compact_invert_flags_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_invert_flags_bgl"),
+            entries: &[
+                storage_rw_entry(5),  // flags
+                uniform_entry(8),     // params
+            ],
+        });
+        let compact_invert_flags_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_invert_flags_bg"),
+            layout: &compact_invert_flags_bgl,
+            entries: &[
+                buf_entry(5, &bufs.compaction_flags),
+                buf_entry(8, &compact_vertex_arrays_params),
+            ],
+        });
+        let compact_invert_flags_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_invert_flags_pl"),
+            bind_group_layouts: &[&compact_invert_flags_bgl],
+            immediate_size: 0,
+        });
+        let compact_invert_flags_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_invert_flags"),
+            layout: Some(&compact_invert_flags_pl),
+            module: &compact_vertex_arrays_shader,
+            entry_point: Some("invert_flags"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // Pass 3: scatter (uses prefix_sum_data as compact_map)
+        let compact_scatter_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_scatter_bgl"),
             entries: &[
                 storage_ro_entry(0),  // uninserted_in
                 storage_ro_entry(1),  // vert_tet_in
-                storage_ro_entry(2),  // insert_list
                 storage_rw_entry(3),  // uninserted_out
                 storage_rw_entry(4),  // vert_tet_out
-                storage_rw_entry(5),  // counter
-                uniform_entry(6),     // params
+                storage_rw_entry(5),  // flags (declared read_write in shader, even though only read here)
+                storage_ro_entry(6),  // compact_map (prefix_sum_data)
+                uniform_entry(8),     // params
             ],
         });
-        let compact_vertex_arrays_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compact_vertex_arrays_bg"),
-            layout: &compact_vertex_arrays_bgl,
+        let compact_scatter_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_scatter_bg"),
+            layout: &compact_scatter_bgl,
             entries: &[
                 buf_entry(0, &bufs.uninserted),
                 buf_entry(1, &bufs.vert_tet),
-                buf_entry(2, &bufs.insert_list),
                 buf_entry(3, &bufs.uninserted_temp),
                 buf_entry(4, &bufs.vert_tet_temp),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &compact_vertex_arrays_params),
+                buf_entry(5, &bufs.compaction_flags),
+                buf_entry(6, &bufs.prefix_sum_data),
+                buf_entry(8, &compact_vertex_arrays_params),
             ],
         });
-        let compact_vertex_arrays_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: Some("compact_vertex_arrays_pl"),
-            bind_group_layouts: &[&compact_vertex_arrays_bgl],
+        let compact_scatter_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_scatter_pl"),
+            bind_group_layouts: &[&compact_scatter_bgl],
             immediate_size: 0,
         });
-        let compact_vertex_arrays_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
-            label: Some("compact_vertex_arrays"),
-            layout: Some(&compact_vertex_arrays_pl),
+        let compact_scatter_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_scatter"),
+            layout: Some(&compact_scatter_pl),
             module: &compact_vertex_arrays_shader,
-            entry_point: Some("compact_vertex_arrays"),
+            entry_point: Some("scatter"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1362,8 +1430,12 @@ impl Pipelines {
             compact_if_negative_pipeline,
             compact_if_negative_bind_group,
             compact_if_negative_params,
-            compact_vertex_arrays_pipeline,
-            compact_vertex_arrays_bind_group,
+            compact_mark_inserted_pipeline,
+            compact_mark_inserted_bind_group,
+            compact_invert_flags_pipeline,
+            compact_invert_flags_bind_group,
+            compact_scatter_pipeline,
+            compact_scatter_bind_group,
             compact_vertex_arrays_params,
             relocate_points_fast_pipeline,
             relocate_points_fast_params,
