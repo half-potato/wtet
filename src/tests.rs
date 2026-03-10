@@ -316,13 +316,13 @@ fn test_delaunay_4_points() {
         eprintln!("  scratch[3] (invalid allocs): {}", counters.scratch[3]);
         eprintln!("  active_count: {}", counters.active_count);
         eprintln!("  inserted_count: {}", counters.inserted_count);
-        eprintln!("  Uninserted: {}", state.uninserted.len());
+        eprintln!("  Uninserted: {}", state.num_uninserted);
 
-        // All points should have been inserted (uninserted list empty)
+        // All points should have been inserted (uninserted count = 0)
         assert!(
-            state.uninserted.is_empty(),
+            state.num_uninserted == 0,
             "All points should be inserted, {} remaining",
-            state.uninserted.len()
+            state.num_uninserted
         );
 
         // Read back raw tet data and check that all points appear somewhere
@@ -384,9 +384,9 @@ fn test_delaunay_cube() {
         pollster::block_on(crate::phase1::run(device, queue, &mut state, &config));
 
         assert!(
-            state.uninserted.is_empty(),
+            state.num_uninserted == 0,
             "All points should be inserted, {} remaining",
-            state.uninserted.len()
+            state.num_uninserted
         );
 
         // Read raw data and verify all points appear
@@ -730,9 +730,9 @@ fn test_flip_convergence() {
         pollster::block_on(crate::phase1::run(device, queue, &mut state, &config));
 
         assert!(
-            state.uninserted.is_empty(),
+            state.num_uninserted == 0,
             "All points should be inserted, {} remaining",
-            state.uninserted.len()
+            state.num_uninserted
         );
 
         let result = pollster::block_on(state.readback(device, queue));

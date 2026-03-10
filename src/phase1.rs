@@ -40,10 +40,10 @@ pub async fn run(
 
     let mut iteration = 0u32;
 
-    while !state.uninserted.is_empty() && iteration < config.max_insert_iterations {
+    while state.num_uninserted > 0 && iteration < config.max_insert_iterations {
         let iter_start = Instant::now();
         iteration += 1;
-        let num_uninserted = state.uninserted.len() as u32;
+        let num_uninserted = state.num_uninserted;
 
         log::debug!(
             "Phase 1 iteration {}: {} points remaining",
@@ -51,28 +51,24 @@ pub async fn run(
             num_uninserted
         );
 
-        // Upload current uninserted list
-        state.buffers.upload_uninserted(queue, &state.uninserted);
+        // Note: uninserted buffer is already on GPU and gets compacted in place each iteration
 
-        // Debug: Check vert_tet at start of iteration
-        if iteration == 2 {
-            // Check vert_tet for uninserted vertices (by POSITION, not vertex ID!)
-            let uninserted_verts: Vec<u32> = state.uninserted.clone();
-            let num_pos = uninserted_verts.len();
-            let vert_tet_debug: Vec<u32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.vert_tet, num_pos)
-                .await;
-            println!("[DEBUG] Iteration 2 start: uninserted verts = {:?}", uninserted_verts);
-            println!("[DEBUG] Iteration 2 start: vert_tet[0..{}] = {:?}", num_pos, &vert_tet_debug[0..num_pos]);
-
-            // Check if those tets are alive
-            let tet_info_debug: Vec<u32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
-                .await;
-            println!("[DEBUG] Iteration 2 start: tet_info[0..10] = {:?}", tet_info_debug);
-        }
+        // Debug: Check vert_tet at start of iteration (DISABLED - too verbose for large datasets)
+        // if iteration == 2 {
+        //     let num_pos = num_uninserted as usize;
+        //     let vert_tet_debug: Vec<u32> = state
+        //         .buffers
+        //         .read_buffer_as(device, queue, &state.buffers.vert_tet, num_pos)
+        //         .await;
+        //     println!("[DEBUG] Iteration 2 start: num_uninserted = {}", num_uninserted);
+        //     println!("[DEBUG] Iteration 2 start: vert_tet[0..{}] = {:?}", num_pos, &vert_tet_debug[0..num_pos]);
+        //
+        //     let tet_info_debug: Vec<u32> = state
+        //         .buffers
+        //         .read_buffer_as(device, queue, &state.buffers.tet_info, 10)
+        //         .await;
+        //     println!("[DEBUG] Iteration 2 start: tet_info[0..10] = {:?}", tet_info_debug);
+        // }
 
         // Reset counters for this iteration
         state.reset_inserted_counter(queue);
@@ -87,7 +83,7 @@ pub async fn run(
 
         // BATCHED: Reset votes → Vote → Pick winner → Build insert list
         // This eliminates 3 submit/poll cycles (was 4 separate submissions, now 1)
-        state.cpu_profiler.begin("vote_batch");
+        state.cpu_profiler.begin("1_vote_phase");
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // 1. Reset votes (vert_sphere, tet_sphere, tet_vert)
@@ -105,24 +101,24 @@ pub async fn run(
 
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        state.cpu_profiler.end("vote_batch");
+        state.cpu_profiler.end("1_vote_phase");
 
-        // Debug: Read vert_sphere and tet_vote after voting
-        if iteration == 2 {
-            let vert_sphere_debug: Vec<i32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.vert_sphere, num_uninserted as usize)
-                .await;
-            let tet_vote_debug: Vec<i32> = state
-                .buffers
-                .read_buffer_as(device, queue, &state.buffers.tet_vote, state.max_tets as usize)
-                .await;
-            println!("[DEBUG] After vote: vert_sphere = {:?}", vert_sphere_debug);
-            println!("[DEBUG] After vote: tet_vote (non-NO_VOTE) = {:?}",
-                tet_vote_debug.iter().enumerate()
-                    .filter(|(_, &v)| v != i32::MIN)
-                    .collect::<Vec<_>>());
-        }
+        // Debug: Read vert_sphere and tet_vote after voting (DISABLED - too verbose for large datasets)
+        // if iteration == 2 {
+        //     let vert_sphere_debug: Vec<i32> = state
+        //         .buffers
+        //         .read_buffer_as(device, queue, &state.buffers.vert_sphere, num_uninserted as usize)
+        //         .await;
+        //     let tet_vote_debug: Vec<i32> = state
+        //         .buffers
+        //         .read_buffer_as(device, queue, &state.buffers.tet_vote, state.max_tets as usize)
+        //         .await;
+        //     println!("[DEBUG] After vote: vert_sphere = {:?}", vert_sphere_debug);
+        //     println!("[DEBUG] After vote: tet_vote (non-NO_VOTE) = {:?}",
+        //         tet_vote_debug.iter().enumerate()
+        //             .filter(|(_, &v)| v != i32::MIN)
+        //             .collect::<Vec<_>>());
+        // }
 
         // Read back how many points were picked for insertion
         let counters = state.buffers.read_counters(device, queue).await;
@@ -133,7 +129,7 @@ pub async fn run(
         if num_inserted == 0 {
             // Debug: Read back vert_tet and tet_vert to see why no winners
             println!("[DEBUG] No winners found! Investigating...");
-            println!("[DEBUG] Remaining uninserted: {:?}", state.uninserted);
+            println!("[DEBUG] Remaining uninserted count: {}", num_uninserted);
 
             log::warn!("No points inserted in iteration {} — breaking", iteration);
             break;
@@ -165,7 +161,7 @@ pub async fn run(
         // Note: Reset scratch counters inline before dispatching
         queue.write_buffer(&state.buffers.counters, 16, bytemuck::cast_slice(&[0u32, 0u32, 0u32]));
 
-        state.cpu_profiler.begin("split_batch");
+        state.cpu_profiler.begin("2_expand");
         let mut encoder = device.create_command_encoder(&Default::default());
 
         // Expand tetrahedron list to make room for new insertions
@@ -174,18 +170,27 @@ pub async fn run(
         // CUDA: expandTetraList( &realInsVertVec, ... ) where realInsVertVec.size() == _insNum
         state.expand_tetra_list(&mut encoder, queue, num_inserted, &insert_list);
 
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        state.cpu_profiler.end("2_expand");
+
         // 5c. Split points (update vert_tet for vertices whose tets are splitting)
+        state.cpu_profiler.begin("3_split_points");
+        let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split_points(&mut encoder, queue, num_uninserted);
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+        state.cpu_profiler.end("3_split_points");
 
         // 5d. Split
+        state.cpu_profiler.begin("4_split");
         println!("[DEBUG] Dispatching split with num_inserted = {}", num_inserted);
+        let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_split(&mut encoder, queue, num_inserted);
-
-        println!("[DEBUG] Submitting batched expand+split_points+split");
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         println!("[DEBUG] Batched operations complete");
-        state.cpu_profiler.end("split_batch");
+        state.cpu_profiler.end("4_split");
 
         // Debug: Check tet_info and counters after split
         if iteration == 1 {
@@ -209,7 +214,6 @@ pub async fn run(
 
         // 6. Flip checking (optional, iterative) - TWO-PHASE FLIPPING
         if config.enable_flipping {
-            state.cpu_profiler.begin("flipping");
             // CUDA two-phase flipping:
             // Phase 1: doFlippingLoop(Fast) - f32 predicates for 99%+ of cases
             // Phase 2: markSpecialTets() → doFlippingLoop(Exact) - DD + SoS for degenerate cases
@@ -237,6 +241,7 @@ pub async fn run(
             let mut total_flips = 0u32;
 
             // ========== PHASE 1: FAST FLIPPING (f32 predicates) ==========
+            state.cpu_profiler.begin("5_flip_fast");
             eprintln!("[FLIP] Starting fast flipping phase with {} initial tets", flip_queue_size);
 
             for flip_iter in 0..config.max_flip_iterations {
@@ -314,14 +319,17 @@ pub async fn run(
             }
 
             eprintln!("[FLIP] Fast phase complete: {} total flips", total_flips);
+            state.cpu_profiler.end("5_flip_fast");
 
             // ========== PHASE 2: EXACT FLIPPING (DD + SoS for degenerate cases) ==========
             // Mark tets that had uncertain predicates (OPP_SPECIAL flag set by fast phase)
+            state.cpu_profiler.begin("6_mark_special");
             eprintln!("[FLIP] Checking for special tets requiring exact predicates...");
             let mut encoder = device.create_command_encoder(&Default::default());
             state.dispatch_mark_special_tets(&mut encoder, queue, tet_num);
             queue.submit(Some(encoder.finish()));
             device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            state.cpu_profiler.end("6_mark_special");
 
             // Count how many special tets need exact processing
             let special_tet_count = state.buffers.read_compact_count(device, queue).await;
@@ -330,6 +338,7 @@ pub async fn run(
             if special_tet_count == 0 {
                 eprintln!("[FLIP] No special tets - fast phase was sufficient");
             } else {
+                state.cpu_profiler.begin("7_flip_exact");
                 eprintln!("[FLIP] Found {} special tets requiring exact predicates", special_tet_count);
 
                 flip_queue_size = special_tet_count;
@@ -409,11 +418,13 @@ pub async fn run(
                 }
 
                 eprintln!("[FLIP] Exact phase complete: {} additional flips, {} total", total_flips - org_flip_num.last().copied().unwrap_or(0), total_flips);
+                state.cpu_profiler.end("7_flip_exact");
             }
 
             // CRITICAL: Relocate points after flipping (updates vert_tet for points whose tets flipped)
             // Port of GpuDel::relocateAll() from GpuDelaunay.cu:1250-1311
             if total_flips > 0 {
+                state.cpu_profiler.begin("8_relocate");
                 // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
                 let init_data = vec![-1i32; state.max_tets as usize];
                 queue.write_buffer(&state.buffers.tet_to_flip, 0, bytemuck::cast_slice(&init_data));
@@ -438,13 +449,13 @@ pub async fn run(
 
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                state.cpu_profiler.end("8_relocate");
             }
-            state.cpu_profiler.end("flipping");
         }
 
         // 7. Remove inserted points from uninserted list and compact vert_tet to match.
         // GPU-accelerated compaction (FLAW #2 fix)
-        state.cpu_profiler.begin("compact");
+        state.cpu_profiler.begin("9_compact");
         {
             // DEBUG: Verify insert_list before compaction
             let insert_list_before: Vec<[u32; 2]> = state
@@ -480,9 +491,9 @@ pub async fn run(
             device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
         }
 
-        // Read back compacted count and arrays
+        // Read back compacted count only (uninserted array stays on GPU)
         let all_counters = state.buffers.read_counters(device, queue).await;
-        let new_count = all_counters.free_count as usize; // counter[0]
+        let new_count = all_counters.free_count; // counter[0]
         println!(
             "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
             iteration, num_uninserted, num_inserted, new_count
@@ -494,15 +505,11 @@ pub async fn run(
             all_counters.inserted_count,
             all_counters.failed_count
         );
-        let new_uninserted: Vec<u32> = state
-            .buffers
-            .read_buffer_as(device, queue, &state.buffers.uninserted, new_count)
-            .await;
 
-        // Update CPU state
-        state.uninserted = new_uninserted;
+        // Update CPU state (count only, array stays on GPU)
+        state.num_uninserted = new_count;
 
-        state.cpu_profiler.end("compact");
+        state.cpu_profiler.end("9_compact");
 
         let iter_duration = iter_start.elapsed();
         eprintln!("[TIMING] Iteration {} completed in {:.3} ms", iteration, iter_duration.as_secs_f64() * 1000.0);
@@ -510,24 +517,25 @@ pub async fn run(
         println!(
             "[DEBUG] After iteration {}: {} points remaining (GPU compacted)",
             iteration,
-            state.uninserted.len()
+            new_count
         );
     }
 
     // Final: gather failed vertices
+    state.cpu_profiler.begin("10_gather");
     {
         let mut encoder = device.create_command_encoder(&Default::default());
         state.dispatch_gather(&mut encoder);
         queue.submit(Some(encoder.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
     }
+    state.cpu_profiler.end("10_gather");
 
-    if !state.uninserted.is_empty() {
+    if state.num_uninserted > 0 {
         println!(
-            "[WARNING] Phase 1 complete after {} iterations, {} points FAILED to insert: {:?}",
+            "[WARNING] Phase 1 complete after {} iterations, {} points FAILED to insert",
             iteration,
-            state.uninserted.len(),
-            state.uninserted
+            state.num_uninserted
         );
     } else {
         println!(

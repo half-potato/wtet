@@ -282,7 +282,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
 
     for (var i = 0u; i < 3u; i++) {
         // Get face vertices for current face
-        // CRITICAL FIX: Cannot use SPLIT_FACES[variable] - causes SIGSEGV
         let fv = get_split_face(face);
 
         // Orient3d test: is vertex above or below this face?
@@ -299,7 +298,6 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
 
         // Navigate to next face based on orientation
-        // CRITICAL FIX: Cannot use SPLIT_NEXT[variable] - causes SIGSEGV
         face = get_split_next(face, orient > 0);
     }
 

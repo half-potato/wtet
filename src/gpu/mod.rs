@@ -16,8 +16,9 @@ pub struct GpuState {
     pub max_tets: u32,
     /// Current number of tets in use (including dead tets)
     pub current_tet_num: u32,
-    /// Points that still need to be inserted (indices into the point array).
-    pub uninserted: Vec<u32>,
+    /// Number of points that still need to be inserted.
+    /// The uninserted vertex IDs are stored in GPU buffer and compacted in place.
+    pub num_uninserted: u32,
     /// Vote offset for separating insertion votes from flip votes
     /// CUDA Reference: GpuDelaunay.cu:1121-1128
     pub vote_offset: u32,
@@ -117,8 +118,8 @@ impl GpuState {
         let pipelines = Pipelines::new(device, &buffers, num_points, max_tets);
         eprintln!("[GPU STATE] ✓ Pipelines created");
 
-        // All real points start as uninserted
-        let uninserted: Vec<u32> = (0..num_points).collect();
+        // All real points start as uninserted (vertex IDs 0..num_points already in GPU buffer)
+        let num_uninserted = num_points;
 
         // Initialize profilers
         let timestamp_period = _queue.get_timestamp_period();
@@ -138,7 +139,7 @@ impl GpuState {
             num_points,
             max_tets,
             current_tet_num: 5, // Start with 5 (5-tet topology created by init kernel)
-            uninserted,
+            num_uninserted,
             vote_offset: max_tets, // Initialize to max (CUDA uses INT_MAX, we use max_tets)
             max_flips: max_tets / 2, // CUDA allocates TetMax/2 flip items
             use_partial_binding,
@@ -273,11 +274,6 @@ impl GpuState {
         let ins_extra_space = num_new_verts * MEAN_VERTEX_DEGREE;
         let new_tet_num = old_tet_num + ins_extra_space;
 
-        eprintln!(
-            "[EXPAND] Expanding tet list: {} → {} (+{} verts × {} = {} tets)",
-            old_tet_num, new_tet_num, num_new_verts, MEAN_VERTEX_DEGREE, ins_extra_space
-        );
-
         // Check if we have enough pre-allocated space
         // CRITICAL: WGPU buffers are fixed size (unlike CUDA's dynamic .grow())
         if new_tet_num > self.max_tets {
@@ -294,27 +290,16 @@ impl GpuState {
         // Port of CUDA kerUpdateVertFreeList (KerDivision.cu:1126-1149)
         // This reinitializes the free lists to mask the allocation/donation bug (see CUDA_FLAWS.md)
 
-        // Print what we're allocating (for debugging)
-        for (idx, &[_tet_idx, position]) in insert_list.iter().enumerate() {
-            let vertex_id = self.uninserted[position as usize];
-            let tet_base = old_tet_num + (idx as u32 * MEAN_VERTEX_DEGREE);
-            eprintln!("[EXPAND] Vertex {} gets tets [{}-{}]", vertex_id, tet_base, tet_base + MEAN_VERTEX_DEGREE - 1);
-        }
-
         // Dispatch GPU kernel to reinitialize free lists
-        eprintln!("[EXPAND] Dispatching update_vert_free_list: {} vertices, start_idx={}", num_new_verts, old_tet_num);
         self.dispatch_update_vert_free_list(
             _encoder,
             queue,
             num_new_verts,
             old_tet_num,
         );
-        eprintln!("[EXPAND] ✓ Free lists reinitialized");
 
         // Update current capacity
         self.current_tet_num = new_tet_num;
-
-        eprintln!("[EXPAND] ✓ Expansion complete, current_tet_num = {}", self.current_tet_num);
 
         // Note: WGPU uses pre-allocated buffers, so no reordering/shifting needed.
         // CUDA's sorting path (lines 477-556 in GpuDelaunay.cu) is not required for
