@@ -26,7 +26,7 @@ fn encode_opp(tet_idx: u32, opp_vi: u32) -> u32 {
     return (tet_idx << 5u) | (opp_vi & 3u);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn shift_opp_tet_idx(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

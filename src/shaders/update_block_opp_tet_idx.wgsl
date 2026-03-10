@@ -55,7 +55,7 @@ fn set_opp_tet(opp_val: u32, new_tet_idx: u32) -> u32 {
     return (new_tet_idx << 5u) | (opp_val & 0x1Fu);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_block_opp_tet_idx(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

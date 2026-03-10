@@ -30,7 +30,7 @@ fn get_flip_type(flip_info: u32) -> u32 {
     return 1u; // Flip32
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn allocate_flip23_slot(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

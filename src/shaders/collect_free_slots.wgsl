@@ -18,7 +18,7 @@ fn is_tet_alive(info: u32) -> bool {
     return (info & TET_ALIVE) != 0u;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn collect_free_slots(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let new_tet_num = params.x;

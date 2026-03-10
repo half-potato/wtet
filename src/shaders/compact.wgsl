@@ -10,7 +10,7 @@
 
 const TET_ALIVE: u32 = 1u;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn make_compact_flags(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -44,7 +44,7 @@ fn remap_opp(packed: u32, cmap: ptr<storage, array<u32>, read>) -> u32 {
     return (new_tet << 5u) | face;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn compact_tets(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

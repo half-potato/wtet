@@ -60,7 +60,7 @@ fn make_positive(val: i32) -> u32 {
     return u32(val);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
     let flip_idx = gid.x;
     let org_flip_num = params.x;

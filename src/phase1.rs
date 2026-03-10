@@ -308,7 +308,7 @@ pub async fn run(
             // Mark tets that had uncertain predicates (OPP_SPECIAL flag set by fast phase)
             eprintln!("[FLIP] Checking for special tets requiring exact predicates...");
             let mut encoder = device.create_command_encoder(&Default::default());
-            state.dispatch_mark_special_tets(&mut encoder, queue, state.max_tets);
+            state.dispatch_mark_special_tets(&mut encoder, queue, tet_num);
             queue.submit(Some(encoder.finish()));
             device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 

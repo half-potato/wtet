@@ -19,7 +19,7 @@ fn is_tet_alive(info: u32) -> bool {
     return (info & TET_ALIVE) != 0u;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn make_compact_map(@builtin(global_invocation_id) gid: vec3<u32>) {
     let new_tet_num = params.x;
     let tet_info_num = params.y;

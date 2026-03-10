@@ -402,7 +402,7 @@ fn orient3d_with_sos(
     return result;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn check_delaunay_exact(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

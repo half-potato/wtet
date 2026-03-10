@@ -13,7 +13,7 @@
 @group(0) @binding(2) var<storage, read_write> rev_map_arr: array<u32>;
 @group(0) @binding(3) var<uniform> params: vec4<u32>; // x = ins_vert_vec_size, y = num
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn make_reverse_map(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

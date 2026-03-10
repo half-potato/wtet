@@ -6,7 +6,7 @@
 
 const NO_VOTE: i32 = 0x7FFFFFFF;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn reset_votes(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -22,7 +22,7 @@ fn reset_votes(
 
 const TET_CHANGED: u32 = 2u;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn clear_changed(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -51,7 +51,7 @@ fn orient3d_simple(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> f3
          + cd.x * (ad.y * bd.z - ad.z * bd.y);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn relocate_points(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

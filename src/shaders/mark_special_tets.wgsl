@@ -33,7 +33,7 @@ fn clear_opp_special(opp: u32) -> u32 {
     return opp & ~OPP_SPECIAL;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn mark_special_tets(@builtin(global_invocation_id) gid: vec3<u32>) {
     let idx = gid.x;
     let tet_num = params.x;

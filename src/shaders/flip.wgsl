@@ -254,7 +254,7 @@ fn allocate_flip23_slot(bot_tet: vec4<u32>) -> u32 {
 }
 
 // Check and perform 2-3 flips for tets in the flip queue.
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn flip_check(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

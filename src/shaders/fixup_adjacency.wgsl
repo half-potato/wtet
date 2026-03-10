@@ -32,7 +32,7 @@ fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
     atomicStore(&tet_opp[tet_idx * 4u + face], val);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn fixup_adjacency(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

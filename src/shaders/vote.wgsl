@@ -86,7 +86,7 @@ fn insphere_fast(
     return vec2<f32>(det, 0.0);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn vote_for_point(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -232,7 +232,7 @@ fn vote_for_point(
 @group(0) @binding(5) var<storage, read> tet_info2: array<u32>;
 @group(0) @binding(6) var<uniform> params2: vec4<u32>; // x = num_uninserted
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn pick_winner_point(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
@@ -294,7 +294,7 @@ fn pick_winner_point(
 
 const COUNTER_INSERTED: u32 = 2u;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn build_insert_list(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

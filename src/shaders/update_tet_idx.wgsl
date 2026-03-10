@@ -23,7 +23,7 @@ fn make_negative(v: i32) -> i32 {
     return -(v + 2);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_tet_idx(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

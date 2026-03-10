@@ -40,7 +40,7 @@ fn set_opp_tet(packed: u32, new_tet_idx: u32) -> u32 {
     return (packed & 0x1Fu) | (new_tet_idx << 5u);
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn compact_tets(@builtin(global_invocation_id) gid: vec3<u32>) {
     let new_tet_num = params.x;
     let tet_info_num = params.y;

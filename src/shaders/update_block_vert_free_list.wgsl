@@ -42,7 +42,7 @@
 
 const MEAN_VERTEX_DEGREE: u32 = 8u;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_block_vert_free_list(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

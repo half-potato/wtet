@@ -66,7 +66,7 @@ fn store_flip(idx: u32, flip: FlipItem) {
     flip_arr[idx * 2u + 1u] = t2;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_flip_trace(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

@@ -14,7 +14,7 @@
 
 const TET_ALIVE: u32 = 1u;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn update_uninserted_vert_tet(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

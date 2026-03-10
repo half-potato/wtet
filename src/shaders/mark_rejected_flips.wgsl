@@ -55,7 +55,7 @@ fn is_flip23(flip_info: u32) -> bool {
 var<workgroup> flip_num: atomic<u32>;
 var<workgroup> flip_offset: u32;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn mark_rejected_flips(@builtin(global_invocation_id) gid: vec3<u32>,
                        @builtin(local_invocation_id) lid: vec3<u32>) {
     let act_tet_num = params.x;

@@ -109,7 +109,7 @@ fn get_free_slots_4tet(vertex: u32) -> vec4<u32> {
     return slots;
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn split_tetra(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

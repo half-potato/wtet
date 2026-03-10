@@ -154,7 +154,7 @@ fn insphere_fast(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>, e: vec3
     return 0; // SideZero
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn check_delaunay_fast(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

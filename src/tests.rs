@@ -174,6 +174,10 @@ fn get_device_sync() -> Option<(wgpu::Device, wgpu::Queue)> {
     let mut limits = wgpu::Limits::default();
     limits.max_storage_buffers_per_shader_stage = 20;  // Increased for block_owner + debug buffers
     limits.max_bind_groups = 4;
+    // Request maximum supported buffer binding size for large datasets (2M+ points)
+    // Default is 128 MB, but most GPUs support up to 2 GB
+    limits.max_storage_buffer_binding_size = adapter.limits().max_storage_buffer_binding_size;
+    limits.max_uniform_buffer_binding_size = adapter.limits().max_uniform_buffer_binding_size;
 
     let (device, queue) = pollster::block_on(adapter.request_device(
         &wgpu::DeviceDescriptor {

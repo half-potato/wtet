@@ -10,7 +10,7 @@
 const NO_VOTE: i32 = i32(0x80000000u);  // Minimum i32 for atomicMax voting
 const INVALID: u32 = 0xFFFFFFFFu;
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn reset_votes(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

@@ -150,7 +150,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     /// Dispatch pick winner.
@@ -175,7 +175,7 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.pick_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.pick_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     /// Dispatch build insert list (filters exact winners after pick_winner).
@@ -198,7 +198,7 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.build_insert_list_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.build_insert_list_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     // REMOVED: dispatch_mark_split
@@ -401,7 +401,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(num_insertions, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_insertions, 256), 1, 1);
     }
 
     /// Dispatch update_uninserted_vert_tet to fix dead tet references.
@@ -429,7 +429,7 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.update_uninserted_vert_tet_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.update_uninserted_vert_tet_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     /// Dispatch flip check.
@@ -536,7 +536,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(queue_size, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(queue_size, 256), 1, 1);
     }
 
     /// Dispatch reset votes.
@@ -557,7 +557,7 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.reset_votes_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.reset_votes_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     /// Dispatch gather failed vertices.
@@ -621,7 +621,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(self.max_tets, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(self.max_tets, 256), 1, 1);
     }
 
     /// Reset the inserted_count counter to 0.
@@ -658,7 +658,7 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.collect_free_slots_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.collect_free_slots_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(new_tet_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(new_tet_num, 256), 1, 1);
     }
 
     /// Dispatch make_compact_map (compactTetras step 2: create old→new mapping).
@@ -681,7 +681,7 @@ impl GpuState {
         } else {
             0
         };
-        pass.dispatch_workgroups(div_ceil(count, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(count, 256), 1, 1);
     }
 
     /// Dispatch compact_tets (compactTetras step 3: physically compact alive tets).
@@ -747,7 +747,7 @@ impl GpuState {
         } else {
             0
         };
-        pass.dispatch_workgroups(div_ceil(count, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(count, 256), 1, 1);
     }
 
     /// Dispatch mark_special_tets (clears OPP_SPECIAL flags between fast/exact flipping).
@@ -803,7 +803,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(tet_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(tet_num, 256), 1, 1);
     }
 
     /// Dispatch update_flip_trace to build flip history chains.
@@ -932,7 +932,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(flip_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(flip_num, 256), 1, 1);
     }
 
     /// Dispatch mark rejected flips (flip validation).
@@ -992,7 +992,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(act_tet_num, 256), 1, 1);
     }
 
     /// Dispatch check delaunay fast (flip voting).
@@ -1062,7 +1062,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(act_tet_num, 256), 1, 1);
     }
 
     /// Dispatch check delaunay exact (with DD + SoS predicates).
@@ -1132,7 +1132,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(act_tet_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(act_tet_num, 256), 1, 1);
     }
 
     /// Dispatch allocate flip23 slot.
@@ -1184,7 +1184,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(flip_num, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(flip_num, 256), 1, 1);
     }
 
     /// Dispatch compact if negative (two-pass compaction).
@@ -1320,7 +1320,7 @@ impl GpuState {
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 64), 1, 1);
+        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
     }
 
     /// Compact tetras: remove dead tets and rebuild arrays compactly.

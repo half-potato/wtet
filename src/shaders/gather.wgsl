@@ -65,7 +65,7 @@ fn opp_entry(opp: vec4<u32>, i: u32) -> u32 {
     }
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn gather_failed(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {

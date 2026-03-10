@@ -43,7 +43,7 @@ fn load_flip_item(flip_idx: u32) -> array<i32, 8> {
     );
 }
 
-@compute @workgroup_size(64)
+@compute @workgroup_size(256)
 fn relocate_points_fast(
     @builtin(global_invocation_id) gid: vec3<u32>,
 ) {
