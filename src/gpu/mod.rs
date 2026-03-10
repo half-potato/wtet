@@ -20,6 +20,12 @@ pub struct GpuState {
     /// Vote offset for separating insertion votes from flip votes
     /// CUDA Reference: GpuDelaunay.cu:1121-1128
     pub vote_offset: u32,
+    /// Maximum number of flips before overflow (matches flip_arr allocation)
+    pub max_flips: u32,
+    /// Enable dynamic partial binding for large datasets (> 128 MB)
+    pub use_partial_binding: bool,
+    /// Device reference for creating dynamic bind groups
+    pub device: wgpu::Device,
 }
 
 impl GpuState {
@@ -37,9 +43,46 @@ impl GpuState {
         // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
         let min_tets_for_blocks = (num_points + 5) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
         // Also consider typical Delaunay tet count (~6.5x points) + overhead for retries
-        // Allocate generously: 30x points to handle worst-case insertions + flips + retries
-        let typical_tets = num_points * 30;
+        // CUDA allocates TetMax = pointNum × 8.5
+        // WGPU: use 8× to stay under 256 MB buffer allocation limit (at 2M points)
+        // 2M points × 8 × 16 bytes = 256 MB (exactly at limit)
+        let typical_tets = num_points * 8;
         let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
+
+        // Validate buffer sizes against WGPU limits
+        let tet_buffer_size = (max_tets as u64) * 16; // vec4<u32> = 16 bytes
+        let flip_arr_size = ((max_tets / 2) as u64) * 32; // FlipItem = 32 bytes
+
+        // WGPU has two limits:
+        // 1. Buffer allocation limit: 256 MB per buffer
+        // 2. Buffer binding limit: 128 MB per binding (in bind groups)
+        let limit_256mb = 256 * 1024 * 1024;
+        let limit_128mb = 128 * 1024 * 1024;
+
+        if tet_buffer_size > limit_256mb {
+            panic!(
+                "Dataset too large: {} points requires {} MB for tet buffers.\n\
+                 WGPU buffer allocation limit is 256 MB per buffer.\n\
+                 Maximum supported: ~2M points. Please chunk your input into smaller batches.",
+                num_points, tet_buffer_size / (1024 * 1024)
+            );
+        }
+
+        // Warn about binding size limit (requires partial binding for all pipelines)
+        if tet_buffer_size > limit_128mb {
+            eprintln!("[WARNING] Dataset size ({} points) exceeds 128 MB binding limit.", num_points);
+            eprintln!("[WARNING] Some pipelines may fail during bind group creation.");
+            eprintln!("[WARNING] For guaranteed support, use < 1M points.");
+            eprintln!("[WARNING] 2M+ points requires complex multi-buffer chunking (not yet implemented).");
+        }
+
+        // Enable partial binding for datasets > 128 MB
+        let use_partial_binding = flip_arr_size > 128 * 1024 * 1024;
+        if use_partial_binding {
+            eprintln!("[GPU STATE] Large dataset detected: using partial buffer binding");
+            eprintln!("[GPU STATE] flip_arr size: {:.2} MB",
+                     flip_arr_size as f64 / (1024.0 * 1024.0));
+        }
 
         // Build point buffer: N real points + 4 super-tet vertices + 1 infinity
         let mut gpu_points: Vec<GpuPoint> = points
@@ -80,6 +123,9 @@ impl GpuState {
             current_tet_num: 5, // Start with 5 (5-tet topology created by init kernel)
             uninserted,
             vote_offset: max_tets, // Initialize to max (CUDA uses INT_MAX, we use max_tets)
+            max_flips: max_tets / 2, // CUDA allocates TetMax/2 flip items
+            use_partial_binding,
+            device: device.clone(),
         }
     }
 

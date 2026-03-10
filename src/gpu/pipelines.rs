@@ -4,12 +4,12 @@ use super::buffers::GpuBuffers;
 pub struct Pipelines {
     // Pipeline: init (make_first_tetra)
     pub init_pipeline: wgpu::ComputePipeline,
-    pub init_bind_group: wgpu::BindGroup,
+    // init_bind_group removed - now created dynamically at dispatch time to avoid 128 MB limit
     pub init_params: wgpu::Buffer,
 
     // Pipeline: vote for point
     pub vote_pipeline: wgpu::ComputePipeline,
-    pub vote_bind_group: wgpu::BindGroup,
+    // vote_bind_group removed - now created dynamically at dispatch time
     pub vote_params: wgpu::Buffer,
 
     // Pipeline: pick winner
@@ -31,12 +31,12 @@ pub struct Pipelines {
 
     // Pipeline: split points (updates vert_tet for uninserted vertices whose tets are splitting)
     pub split_points_pipeline: wgpu::ComputePipeline,
-    pub split_points_bind_group: wgpu::BindGroup,
+    // split_points_bind_group removed - now created dynamically at dispatch time
     pub split_points_params: wgpu::Buffer,
 
     // Pipeline: split tetra
     pub split_pipeline: wgpu::ComputePipeline,
-    pub split_bind_group: wgpu::BindGroup,
+    // split_bind_group removed - now created dynamically at dispatch time
     pub split_params: wgpu::Buffer,
 
     // Pipeline: update uninserted vert_tet (fixes dead tet references)
@@ -46,9 +46,7 @@ pub struct Pipelines {
 
     // Pipeline: flip check
     pub flip_pipeline: wgpu::ComputePipeline,
-    pub flip_bind_group: wgpu::BindGroup,
-    /// Alternate bind group with flip_queue/flip_queue_next swapped.
-    pub flip_bind_group_b: wgpu::BindGroup,
+    // flip_bind_group and flip_bind_group_b removed - now created dynamically at dispatch time
     pub flip_params: wgpu::Buffer,
 
     // Pipeline: reset votes
@@ -58,22 +56,21 @@ pub struct Pipelines {
 
     // Pipeline: gather failed
     pub gather_pipeline: wgpu::ComputePipeline,
-    pub gather_bind_group: wgpu::BindGroup,
+    // gather_bind_group removed - now created dynamically at dispatch time
     pub gather_params: wgpu::Buffer,
 
     // Pipeline: check delaunay fast (flip voting)
     pub check_delaunay_fast_pipeline: wgpu::ComputePipeline,
-    pub check_delaunay_fast_bind_group: wgpu::BindGroup,
+    // check_delaunay_fast_bind_group removed - now created dynamically at dispatch time
     pub check_delaunay_fast_params: wgpu::Buffer,
 
     // Pipeline: check delaunay exact (flip voting with DD + SoS)
     pub check_delaunay_exact_pipeline: wgpu::ComputePipeline,
-    pub check_delaunay_exact_bind_group: wgpu::BindGroup,
+    // check_delaunay_exact_bind_group removed - now created dynamically at dispatch time
     pub check_delaunay_exact_params: wgpu::Buffer,
 
     // Pipeline: allocate flip23 slot
     pub allocate_flip23_slot_pipeline: wgpu::ComputePipeline,
-    pub allocate_flip23_slot_bind_group: wgpu::BindGroup,
     pub allocate_flip23_slot_params: wgpu::Buffer,
 
     // Pipeline: compact if negative
@@ -88,18 +85,34 @@ pub struct Pipelines {
 
     // Pipeline: relocate points fast
     pub relocate_points_fast_pipeline: wgpu::ComputePipeline,
-    pub relocate_points_fast_bind_group: wgpu::BindGroup,
     pub relocate_points_fast_params: wgpu::Buffer,
 
     // Pipeline: update opp (fix adjacency after flips)
     pub update_opp_pipeline: wgpu::ComputePipeline,
-    pub update_opp_bind_group: wgpu::BindGroup,
     pub update_opp_params: wgpu::Buffer,
 
     // Pipeline: update flip trace (build flip history chains for relocateAll)
     pub update_flip_trace_pipeline: wgpu::ComputePipeline,
-    pub update_flip_trace_bind_group: wgpu::BindGroup,
     pub update_flip_trace_params: wgpu::Buffer,
+
+    // Bind group layouts (exposed for dynamic partial binding)
+    pub update_flip_trace_bgl: wgpu::BindGroupLayout,
+    pub update_opp_bgl: wgpu::BindGroupLayout,
+    pub relocate_points_fast_bgl: wgpu::BindGroupLayout,
+
+    // Phase 2: Additional layouts for 11 pipelines that bind large buffers
+    pub init_bgl: wgpu::BindGroupLayout,
+    pub vote_bgl: wgpu::BindGroupLayout,
+    pub split_points_bgl: wgpu::BindGroupLayout,
+    pub split_bgl: wgpu::BindGroupLayout,
+    pub flip_bgl: wgpu::BindGroupLayout,
+    pub gather_bgl: wgpu::BindGroupLayout,
+    pub compact_tets_bgl: wgpu::BindGroupLayout,
+    pub mark_special_tets_bgl: wgpu::BindGroupLayout,
+    pub check_delaunay_fast_bgl: wgpu::BindGroupLayout,
+    pub check_delaunay_exact_bgl: wgpu::BindGroupLayout,
+    pub mark_rejected_flips_bgl: wgpu::BindGroupLayout,
+    pub allocate_flip23_slot_bgl: wgpu::BindGroupLayout,
 
     // Pipeline: collect free slots (compactTetras step 1)
     pub collect_free_slots_pipeline: wgpu::ComputePipeline,
@@ -113,17 +126,16 @@ pub struct Pipelines {
 
     // Pipeline: compact tets (compactTetras step 3)
     pub compact_tets_pipeline: wgpu::ComputePipeline,
-    pub compact_tets_bind_group: wgpu::BindGroup,
+    // compact_tets_bind_group removed - now created dynamically at dispatch time
     pub compact_tets_params: wgpu::Buffer,
 
     // Pipeline: mark special tets (between fast/exact flipping)
     pub mark_special_tets_pipeline: wgpu::ComputePipeline,
-    pub mark_special_tets_bind_group: wgpu::BindGroup,
+    // mark_special_tets_bind_group removed - now created dynamically at dispatch time
     pub mark_special_tets_params: wgpu::Buffer,
 
     // Pipeline: mark rejected flips
     pub mark_rejected_flips_pipeline: wgpu::ComputePipeline,
-    pub mark_rejected_flips_bind_group: wgpu::BindGroup,
     pub mark_rejected_flips_params: wgpu::Buffer,
 
     // --- GPU Prefix Sum Pipelines ---
@@ -177,21 +189,7 @@ impl Pipelines {
             ],
         });
 
-        let init_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("init_bg"),
-            layout: &init_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.free_arr),
-                buf_entry(6, &bufs.vert_free_arr),
-                buf_entry(7, &bufs.counters),
-                buf_entry(8, &init_params),
-            ],
-        });
+        // init_bind_group removed - created dynamically at dispatch time to avoid 128 MB buffer binding limit
 
         let init_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("init_pl"),
@@ -232,20 +230,7 @@ impl Pipelines {
             ],
         });
 
-        let vote_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("vote_bg"),
-            layout: &vote_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_info),
-                buf_entry(3, &bufs.tet_vote),
-                buf_entry(4, &bufs.vert_sphere),
-                buf_entry(5, &bufs.vert_tet),
-                buf_entry(6, &bufs.uninserted),
-                buf_entry(7, &vote_params),
-            ],
-        });
+        // vote_bind_group removed - created dynamically at dispatch time
 
         let vote_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("vote_pl"),
@@ -436,23 +421,7 @@ impl Pipelines {
             ],
         });
 
-        let split_points_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("split_points_bg"),
-            layout: &split_points_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.vert_tet),
-                buf_entry(5, &bufs.free_arr),
-                buf_entry(6, &bufs.vert_free_arr),
-                buf_entry(7, &bufs.counters),
-                buf_entry(8, &bufs.uninserted),
-                buf_entry(9, &bufs.tet_to_vert),
-                buf_entry(10, &split_points_params),
-            ],
-        });
+        // split_points_bind_group removed - created dynamically at dispatch time
 
         let split_points_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("split_points_pl"),
@@ -499,26 +468,7 @@ impl Pipelines {
             ],
         });
 
-        let split_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("split_bg"),
-            layout: &split_bgl,
-            entries: &[
-                buf_entry(0, &bufs.tets),
-                buf_entry(1, &bufs.tet_opp),
-                buf_entry(2, &bufs.tet_info),
-                buf_entry(3, &bufs.vert_tet),
-                buf_entry(4, &bufs.insert_list),
-                buf_entry(5, &bufs.free_arr),
-                buf_entry(6, &bufs.vert_free_arr),
-                buf_entry(7, &bufs.counters),
-                buf_entry(8, &bufs.flip_queue),
-                buf_entry(9, &bufs.tet_to_vert),
-                buf_entry(10, &split_params),
-                buf_entry(11, &bufs.block_owner),
-                buf_entry(12, &bufs.uninserted),
-                // NOTE: Removed breadcrumbs and thread_debug to stay under 10 storage buffer limit
-            ],
-        });
+        // split_bind_group removed - created dynamically at dispatch time
 
         let split_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("split_pl"),
@@ -609,44 +559,7 @@ impl Pipelines {
             ],
         });
 
-        let flip_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flip_bg"),
-            layout: &flip_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.free_arr),
-                buf_entry(5, &bufs.vert_free_arr),
-                buf_entry(6, &bufs.counters),
-                buf_entry(7, &bufs.flip_queue),
-                buf_entry(8, &bufs.flip_queue_next),
-                buf_entry(9, &bufs.flip_count),
-                buf_entry(10, &flip_params),
-                buf_entry(11, &bufs.block_owner),
-            ],
-        });
-
-        // Alternate bind group: flip_queue and flip_queue_next swapped
-        let flip_bind_group_b = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("flip_bg_b"),
-            layout: &flip_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.free_arr),
-                buf_entry(5, &bufs.vert_free_arr),
-                buf_entry(6, &bufs.counters),
-                buf_entry(7, &bufs.flip_queue_next),  // swapped: read from next
-                buf_entry(8, &bufs.flip_queue),        // swapped: write to original
-                buf_entry(9, &bufs.flip_count),
-                buf_entry(10, &flip_params),
-                buf_entry(11, &bufs.block_owner),
-            ],
-        });
+        // flip_bind_group and flip_bind_group_b removed - created dynamically at dispatch time
 
         let flip_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("flip_pl"),
@@ -734,19 +647,7 @@ impl Pipelines {
             ],
         });
 
-        let gather_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("gather_bg"),
-            layout: &gather_bgl,
-            entries: &[
-                buf_entry(0, &bufs.points),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.failed_verts),
-                buf_entry(5, &bufs.counters),
-                buf_entry(6, &gather_params),
-            ],
-        });
+        // gather_bind_group removed - created dynamically at dispatch time
 
         let gather_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("gather_pl"),
@@ -865,17 +766,7 @@ impl Pipelines {
             label: Some("compact_tets_bgl"),
             entries: &[storage_ro_entry(0), storage_ro_entry(1), storage_rw_entry(2), storage_rw_entry(3), uniform_entry(4)],
         });
-        let compact_tets_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("compact_tets_bg"),
-            layout: &compact_tets_bgl,
-            entries: &[
-                buf_entry(0, &bufs.tet_info),
-                buf_entry(1, &bufs.prefix_sum_data),
-                buf_entry(2, &bufs.tets),
-                buf_entry(3, &bufs.tet_opp),
-                buf_entry(4, &compact_tets_params),
-            ],
-        });
+        // compact_tets_bind_group removed - created dynamically at dispatch time
         let compact_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("compact_tets_pl"),
             bind_group_layouts: &[&compact_tets_bgl],
@@ -906,17 +797,7 @@ impl Pipelines {
                 uniform_entry(4),     // params
             ],
         });
-        let mark_special_tets_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mark_special_tets_bg"),
-            layout: &mark_special_tets_bgl,
-            entries: &[
-                buf_entry(0, &bufs.tet_info),
-                buf_entry(1, &bufs.tet_opp),
-                buf_entry(2, &bufs.act_tet_vec),
-                buf_entry(3, &bufs.counters),
-                buf_entry(4, &mark_special_tets_params),
-            ],
-        });
+        // mark_special_tets_bind_group removed - created dynamically at dispatch time
         let mark_special_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("mark_special_tets_pl"),
             bind_group_layouts: &[&mark_special_tets_bgl],
@@ -940,15 +821,6 @@ impl Pipelines {
         let update_flip_trace_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
             label: Some("update_flip_trace_bgl"),
             entries: &[storage_rw_entry(0), storage_rw_entry(1), uniform_entry(2)],
-        });
-        let update_flip_trace_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("update_flip_trace_bg"),
-            layout: &update_flip_trace_bgl,
-            entries: &[
-                buf_entry(0, &bufs.flip_arr),
-                buf_entry(1, &bufs.tet_to_flip),
-                buf_entry(2, &update_flip_trace_params),
-            ],
         });
         let update_flip_trace_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_flip_trace_pl"),
@@ -980,17 +852,6 @@ impl Pipelines {
                 uniform_entry(4),    // params
             ],
         });
-        let update_opp_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("update_opp_bg"),
-            layout: &update_opp_bgl,
-            entries: &[
-                buf_entry(0, &bufs.flip_arr),
-                buf_entry(1, &bufs.tet_opp),
-                buf_entry(2, &bufs.tet_msg_arr),
-                buf_entry(3, &bufs.encoded_face_vi_arr),
-                buf_entry(4, &update_opp_params),
-            ],
-        });
         let update_opp_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("update_opp_pl"),
             bind_group_layouts: &[&update_opp_bgl],
@@ -1016,20 +877,6 @@ impl Pipelines {
             entries: &[
                 storage_rw_entry(0), storage_ro_entry(1), storage_ro_entry(2), storage_rw_entry(3),
                 storage_rw_entry(4), storage_rw_entry(5), storage_rw_entry(6), uniform_entry(7),
-            ],
-        });
-        let mark_rejected_flips_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("mark_rejected_flips_bg"),
-            layout: &mark_rejected_flips_bgl,
-            entries: &[
-                buf_entry(0, &bufs.act_tet_vec),
-                buf_entry(1, &bufs.tet_opp),
-                buf_entry(2, &bufs.tet_vote),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.vote_arr),
-                buf_entry(5, &bufs.flip_to_tet),
-                buf_entry(6, &bufs.counters),
-                buf_entry(7, &mark_rejected_flips_params),
             ],
         });
         let mark_rejected_flips_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1066,21 +913,7 @@ impl Pipelines {
                 uniform_entry(8),     // params
             ],
         });
-        let check_delaunay_fast_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("check_delaunay_fast_bg"),
-            layout: &check_delaunay_fast_bgl,
-            entries: &[
-                buf_entry(0, &bufs.act_tet_vec),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.tet_vote),  // tet_vote_arr
-                buf_entry(5, &bufs.vote_arr),
-                buf_entry(6, &bufs.counters),
-                buf_entry(7, &bufs.points),
-                buf_entry(8, &check_delaunay_fast_params),
-            ],
-        });
+        // check_delaunay_fast_bind_group removed - created dynamically at dispatch time
         let check_delaunay_fast_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("check_delaunay_fast_pl"),
             bind_group_layouts: &[&check_delaunay_fast_bgl],
@@ -1115,21 +948,7 @@ impl Pipelines {
                 uniform_entry(8),     // params
             ],
         });
-        let check_delaunay_exact_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("check_delaunay_exact_bg"),
-            layout: &check_delaunay_exact_bgl,
-            entries: &[
-                buf_entry(0, &bufs.act_tet_vec),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.tet_opp),
-                buf_entry(3, &bufs.tet_info),
-                buf_entry(4, &bufs.tet_vote),  // tet_vote_arr
-                buf_entry(5, &bufs.vote_arr),
-                buf_entry(6, &bufs.counters),
-                buf_entry(7, &bufs.points),
-                buf_entry(8, &check_delaunay_exact_params),
-            ],
-        });
+        // check_delaunay_exact_bind_group removed - created dynamically at dispatch time
         let check_delaunay_exact_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("check_delaunay_exact_pl"),
             bind_group_layouts: &[&check_delaunay_exact_bgl],
@@ -1159,18 +978,6 @@ impl Pipelines {
                 storage_ro_entry(3),  // free_arr
                 storage_rw_entry(4),  // flip23_new_slot
                 uniform_entry(5),     // params
-            ],
-        });
-        let allocate_flip23_slot_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("allocate_flip23_slot_bg"),
-            layout: &allocate_flip23_slot_bgl,
-            entries: &[
-                buf_entry(0, &bufs.flip_to_tet),
-                buf_entry(1, &bufs.tets),
-                buf_entry(2, &bufs.vert_free_arr),
-                buf_entry(3, &bufs.free_arr),
-                buf_entry(4, &bufs.flip23_new_slot),
-                buf_entry(5, &allocate_flip23_slot_params),
             ],
         });
         let allocate_flip23_slot_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1286,18 +1093,6 @@ impl Pipelines {
                 storage_ro_entry(3),  // flip_arr
                 storage_ro_entry(4),  // points
                 uniform_entry(5),     // params
-            ],
-        });
-        let relocate_points_fast_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("relocate_points_fast_bg"),
-            layout: &relocate_points_fast_bgl,
-            entries: &[
-                buf_entry(0, &bufs.uninserted),
-                buf_entry(1, &bufs.vert_tet),
-                buf_entry(2, &bufs.tet_to_flip),
-                buf_entry(3, &bufs.flip_arr),
-                buf_entry(4, &bufs.points),
-                buf_entry(5, &relocate_points_fast_params),
             ],
         });
         let relocate_points_fast_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
@@ -1532,10 +1327,8 @@ impl Pipelines {
 
         Self {
             init_pipeline,
-            init_bind_group,
             init_params,
             vote_pipeline,
-            vote_bind_group,
             vote_params,
             pick_pipeline,
             pick_bind_group,
@@ -1547,32 +1340,24 @@ impl Pipelines {
             update_vert_free_bind_group,
             update_vert_free_params,
             split_points_pipeline,
-            split_points_bind_group,
             split_points_params,
             split_pipeline,
-            split_bind_group,
             split_params,
             update_uninserted_vert_tet_pipeline,
             update_uninserted_vert_tet_bind_group,
             update_uninserted_vert_tet_params,
             flip_pipeline,
-            flip_bind_group,
-            flip_bind_group_b,
             flip_params,
             reset_votes_pipeline,
             reset_votes_bind_group,
             reset_votes_params,
             gather_pipeline,
-            gather_bind_group,
             gather_params,
             check_delaunay_fast_pipeline,
-            check_delaunay_fast_bind_group,
             check_delaunay_fast_params,
             check_delaunay_exact_pipeline,
-            check_delaunay_exact_bind_group,
             check_delaunay_exact_params,
             allocate_flip23_slot_pipeline,
-            allocate_flip23_slot_bind_group,
             allocate_flip23_slot_params,
             compact_if_negative_pipeline,
             compact_if_negative_bind_group,
@@ -1581,14 +1366,26 @@ impl Pipelines {
             compact_vertex_arrays_bind_group,
             compact_vertex_arrays_params,
             relocate_points_fast_pipeline,
-            relocate_points_fast_bind_group,
             relocate_points_fast_params,
             update_opp_pipeline,
-            update_opp_bind_group,
             update_opp_params,
             update_flip_trace_pipeline,
-            update_flip_trace_bind_group,
             update_flip_trace_params,
+            update_flip_trace_bgl,
+            update_opp_bgl,
+            relocate_points_fast_bgl,
+            init_bgl,
+            vote_bgl,
+            split_points_bgl,
+            split_bgl,
+            flip_bgl,
+            gather_bgl,
+            compact_tets_bgl,
+            mark_special_tets_bgl,
+            check_delaunay_fast_bgl,
+            check_delaunay_exact_bgl,
+            mark_rejected_flips_bgl,
+            allocate_flip23_slot_bgl,
             collect_free_slots_pipeline,
             collect_free_slots_bind_group,
             collect_free_slots_params,
@@ -1596,13 +1393,10 @@ impl Pipelines {
             make_compact_map_bind_group,
             make_compact_map_params,
             compact_tets_pipeline,
-            compact_tets_bind_group,
             compact_tets_params,
             mark_special_tets_pipeline,
-            mark_special_tets_bind_group,
             mark_special_tets_params,
             mark_rejected_flips_pipeline,
-            mark_rejected_flips_bind_group,
             mark_rejected_flips_params,
             transform_pipeline,
             transform_bind_group,

@@ -1230,6 +1230,55 @@ fn test_delaunay_uniform_200() {
 }
 
 #[test]
+fn test_delaunay_uniform_20k() {
+    with_gpu(|device, queue| {
+        let points = gen_uniform_random(20_000, 54321);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+        assert!(!result.tets.is_empty(), "Should produce tets");
+        let v = validate_full(&normalized, &result.tets, &result.adjacency);
+        assert!(v.is_ok(), "200 uniform: {}", v.unwrap_err());
+    });
+}
+
+#[test]
+fn test_delaunay_uniform_200k() {
+    with_gpu(|device, queue| {
+        let points = gen_uniform_random(200_000, 54321);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+        assert!(!result.tets.is_empty(), "Should produce tets");
+        let v = validate_full(&normalized, &result.tets, &result.adjacency);
+        assert!(v.is_ok(), "200 uniform: {}", v.unwrap_err());
+    });
+}
+
+#[test]
+#[test]
+fn test_delaunay_uniform_2M() {
+    with_gpu(|device, queue| {
+        let points = gen_uniform_random(2_000_000, 54321);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+        assert!(!result.tets.is_empty(), "Should produce tets");
+        let v = validate_full(&normalized, &result.tets, &result.adjacency);
+        assert!(v.is_ok(), "2M uniform: {}", v.unwrap_err());
+    });
+}
+
+#[test]
+fn test_delaunay_uniform_20M() {
+    with_gpu(|device, queue| {
+        let points = gen_uniform_random(20_000_000, 54321);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+        assert!(!result.tets.is_empty(), "Should produce tets");
+        let v = validate_full(&normalized, &result.tets, &result.adjacency);
+        assert!(v.is_ok(), "200 uniform: {}", v.unwrap_err());
+    });
+}
+
+#[test]
 fn test_delaunay_grid_4x4x4() {
     with_gpu(|device, queue| {
         let points = gen_grid(4, 4, 4);

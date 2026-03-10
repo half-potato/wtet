@@ -83,10 +83,6 @@ pub struct GpuBuffers {
     // Debug buffers
     /// Breadcrumbs: u32 per thread (marks progress through shader)
     pub breadcrumbs: wgpu::Buffer,
-    /// Per-thread debug slots: 16 * vec4<u32> per thread
-    pub thread_debug: wgpu::Buffer,
-    /// Debug buffer for update_uninserted_vert_tet kernel: 4 * vec4<u32> per thread
-    pub update_debug: wgpu::Buffer,
 
     /// Block ownership lookup: u32 × max_blocks
     /// Maps block index to owning vertex (pre-computed at initialization)
@@ -386,7 +382,7 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
-        // Debug buffers: breadcrumbs (u32 per thread) and debug slots (16 * vec4 per thread)
+        // Debug buffers: breadcrumbs (u32 per thread)
         let max_threads = max_tets; // Conservative: as many threads as tets
         let breadcrumbs = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("breadcrumbs"),
@@ -395,24 +391,13 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
-        let thread_debug = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("thread_debug"),
-            size: (max_threads as u64) * 16 * 16, // 16 vec4<u32> per thread
-            usage: storage_rw,
-            mapped_at_creation: false,
-        });
-
-        let update_debug = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("update_debug"),
-            size: (max_threads as u64) * 4 * 16, // 4 vec4<u32> per thread
-            usage: storage_rw,
-            mapped_at_creation: false,
-        });
-
         // --- New buffers for missing kernels ---
+        // FlipItem array: vec4<i32> × (max_tets / 2) - stored as pairs of vec4
+        // CUDA allocates TetMax/2 flip items (conservative: ~1 flip per 2 tets)
+        // CUDA Reference: GpuDelaunay.cu:1057 _flipVec.resize(TetMax / 2)
         let flip_arr = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("flip_arr"),
-            size: (max_tets as u64) * 2 * 16, // FlipItem = 2 * vec4<i32> = 32 bytes
+            size: ((max_tets / 2) as u64) * 2 * 16, // FlipItem = 2 * vec4<i32> = 32 bytes
             usage: storage_rw,
             mapped_at_creation: false,
         });
@@ -560,8 +545,6 @@ impl GpuBuffers {
             flip_to_tet,
             flip23_new_slot,
             breadcrumbs,
-            thread_debug,
-            update_debug,
             block_owner,
             scan_in,
             scan_out,
@@ -769,86 +752,4 @@ impl GpuBuffers {
             .await
     }
 
-    /// Read debug slots for a specific thread (16 vec4<u32>)
-    pub async fn read_thread_debug(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        thread_id: usize,
-    ) -> Vec<[u32; 4]> {
-        let offset = thread_id * 16 * 16; // 16 vec4<u32> per thread
-        let size = 16 * 16; // bytes
-
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("thread_debug_staging"),
-            size: size as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&self.thread_debug, offset as u64, &staging, 0, size as u64);
-        queue.submit(Some(encoder.finish()));
-
-        let slice = staging.slice(..);
-        let (tx, rx) = futures_channel::oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        rx.await.unwrap().unwrap();
-
-        let data = slice.get_mapped_range();
-        let raw: Vec<u32> = bytemuck::cast_slice(&data[..]).to_vec();
-        drop(data);
-        staging.unmap();
-
-        // Convert to array of [u32; 4]
-        raw.chunks_exact(4).map(|chunk| [chunk[0], chunk[1], chunk[2], chunk[3]]).collect()
-    }
-
-    /// Read update_debug data for the first num_threads threads.
-    /// Returns a vector where each element is 4 vec4<u32> values for one thread.
-    pub async fn read_update_debug(
-        &self,
-        device: &wgpu::Device,
-        queue: &wgpu::Queue,
-        num_threads: usize,
-    ) -> Vec<[[u32; 4]; 4]> {
-        let size = num_threads * 4 * 16; // 4 vec4<u32> per thread
-
-        let staging = device.create_buffer(&wgpu::BufferDescriptor {
-            label: Some("update_debug_staging"),
-            size: size as u64,
-            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
-            mapped_at_creation: false,
-        });
-
-        let mut encoder = device.create_command_encoder(&Default::default());
-        encoder.copy_buffer_to_buffer(&self.update_debug, 0, &staging, 0, size as u64);
-        queue.submit(Some(encoder.finish()));
-
-        let slice = staging.slice(..);
-        let (tx, rx) = futures_channel::oneshot::channel();
-        slice.map_async(wgpu::MapMode::Read, move |result| {
-            let _ = tx.send(result);
-        });
-        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-        rx.await.unwrap().unwrap();
-
-        let data = slice.get_mapped_range();
-        let raw: Vec<u32> = bytemuck::cast_slice(&data[..]).to_vec();
-        drop(data);
-        staging.unmap();
-
-        // Convert to array of [[u32; 4]; 4] (4 vec4s per thread)
-        raw.chunks_exact(16).map(|chunk| {
-            [
-                [chunk[0], chunk[1], chunk[2], chunk[3]],
-                [chunk[4], chunk[5], chunk[6], chunk[7]],
-                [chunk[8], chunk[9], chunk[10], chunk[11]],
-                [chunk[12], chunk[13], chunk[14], chunk[15]],
-            ]
-        }).collect()
-    }
 }
