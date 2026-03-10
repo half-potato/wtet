@@ -82,6 +82,11 @@ pub struct Pipelines {
     pub compact_if_negative_bind_group: wgpu::BindGroup,
     pub compact_if_negative_params: wgpu::Buffer,
 
+    // Pipeline: compact vertex arrays (atomic-based, 2 passes - fast path)
+    pub compact_atomic_pipeline: wgpu::ComputePipeline,
+    pub compact_atomic_bind_group: wgpu::BindGroup,
+    pub compact_atomic_params: wgpu::Buffer,
+
     // Pipeline: compact vertex arrays (prefix-sum-based, 3 passes)
     pub compact_mark_inserted_pipeline: wgpu::ComputePipeline,
     pub compact_mark_inserted_bind_group: wgpu::BindGroup,
@@ -1112,6 +1117,52 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- compact_vertex_arrays_atomic (fast path for small datasets, 2 passes) ---
+        let compact_atomic_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("compact_vertex_arrays_atomic.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_vertex_arrays_atomic.wgsl").into()),
+        });
+        let compact_atomic_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+
+        let compact_atomic_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("compact_atomic_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // insert_list
+                storage_ro_entry(1),  // uninserted_in
+                storage_ro_entry(2),  // vert_tet_in
+                storage_rw_entry(3),  // uninserted_out
+                storage_rw_entry(4),  // vert_tet_out
+                storage_rw_entry(5),  // counters
+                uniform_entry(6),     // params
+            ],
+        });
+        let compact_atomic_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("compact_atomic_bg"),
+            layout: &compact_atomic_bgl,
+            entries: &[
+                buf_entry(0, &bufs.insert_list),
+                buf_entry(1, &bufs.uninserted),
+                buf_entry(2, &bufs.vert_tet),
+                buf_entry(3, &bufs.uninserted_temp),
+                buf_entry(4, &bufs.vert_tet_temp),
+                buf_entry(5, &bufs.counters),
+                buf_entry(6, &compact_atomic_params),
+            ],
+        });
+        let compact_atomic_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("compact_atomic_pl"),
+            bind_group_layouts: &[&compact_atomic_bgl],
+            immediate_size: 0,
+        });
+        let compact_atomic_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("compact_atomic"),
+            layout: Some(&compact_atomic_pl),
+            module: &compact_atomic_shader,
+            entry_point: Some("compact_atomic"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- compact_vertex_arrays (prefix-sum-based, 3 passes) ---
         let compact_vertex_arrays_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compact_vertex_arrays_new.wgsl"),
@@ -1618,6 +1669,9 @@ impl Pipelines {
             compact_if_negative_pipeline,
             compact_if_negative_bind_group,
             compact_if_negative_params,
+            compact_atomic_pipeline,
+            compact_atomic_bind_group,
+            compact_atomic_params,
             compact_mark_inserted_pipeline,
             compact_mark_inserted_bind_group,
             compact_invert_flags_pipeline,

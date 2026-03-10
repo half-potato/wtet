@@ -1273,6 +1273,72 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(input_size, 256), 1, 1);
     }
 
+    /// Compact vertex arrays using atomic counters (fast path for small datasets).
+    /// Two-pass algorithm: Pass 0 counts non-inserted, Pass 1 scatters them.
+    /// Much faster than prefix sum for typical datasets (< 100k elements).
+    /// Returns a new encoder and the new uninserted count.
+    pub async fn dispatch_compact_vertex_arrays_atomic(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        num_uninserted: u32,
+        num_inserted: u32,
+    ) -> (wgpu::CommandEncoder, u32) {
+        // Reset first 2 counters to 0 (used for atomic counting)
+        // counters buffer is 8 u32s total, only reset first 2
+        queue.write_buffer(
+            &self.buffers.counters,
+            0,
+            bytemuck::cast_slice(&[0u32, 0u32]),
+        );
+
+        let mut encoder = device.create_command_encoder(&wgpu::CommandEncoderDescriptor {
+            label: Some("compact_atomic"),
+        });
+
+        // Pass 0: Count non-inserted positions
+        queue.write_buffer(
+            &self.pipelines.compact_atomic_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, num_inserted, 0u32, 0u32]),
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_atomic_count"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.compact_atomic_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_atomic_bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        }
+
+        // Pass 1: Scatter non-inserted vertices
+        queue.write_buffer(
+            &self.pipelines.compact_atomic_params,
+            0,
+            bytemuck::cast_slice(&[num_uninserted, num_inserted, 1u32, 0u32]),
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("compact_atomic_scatter"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.compact_atomic_pipeline);
+            pass.set_bind_group(0, Some(&self.pipelines.compact_atomic_bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        }
+
+        // Submit and read count (single readback of 4 bytes)
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        let new_count = self.buffers.read_collection_count(device, queue).await;
+
+        // Create encoder for buffer copies (caller will copy uninserted_copy → uninserted)
+        let encoder2 = device.create_command_encoder(&Default::default());
+        (encoder2, new_count)
+    }
+
     /// Dispatch compact vertex arrays (two-pass compaction).
     /// Compacts both uninserted and vert_tet arrays by removing inserted vertices.
     ///
@@ -1466,31 +1532,49 @@ impl GpuState {
             pass.dispatch_workgroups((num_elements + 255) / 256, 1, 1);
         }
 
+        // OPTIMIZATION: Read only last element (8 bytes instead of potentially MB)
+        // Copy last elements to staging buffer before submitting
+        let last_idx = (num_elements - 1) as u64;
+        let staging = device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("last_element_staging"),
+            size: 8,  // 2 u32s (prefix_sum + flag)
+            usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        });
+
+        // Copy last prefix_sum element
+        encoder2.copy_buffer_to_buffer(
+            &self.buffers.prefix_sum_data,
+            last_idx * 4,
+            &staging,
+            0,
+            4,
+        );
+
+        // Copy last flag element
+        encoder2.copy_buffer_to_buffer(
+            &self.buffers.compaction_flags,
+            last_idx * 4,
+            &staging,
+            4,
+            4,
+        );
+
         queue.submit(Some(encoder2.finish()));
         device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-        // Read back last element of prefix sum to get new_count
-        let last_idx = (num_elements - 1) as usize;
-        let compact_map: Vec<u32> = self.buffers.read_buffer_as(
-            device,
-            queue,
-            &self.buffers.prefix_sum_data,
-            last_idx + 1,
-        ).await;
+        // Read only 8 bytes from staging buffer
+        let slice = staging.slice(..);
+        slice.map_async(wgpu::MapMode::Read, |_| {});
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-        // new_count = last prefix sum value + last flag value
-        // But since we did exclusive prefix sum, we need to add the last flag
-        // Actually, for exclusive prefix sum: new_count = prefix[n-1] + flags[n-1]
-        // But we don't have flags[n-1] here easily. Let's just read prefix[n] if it exists.
-        // Actually, easier: read one extra element from flags buffer to compute final count
-        let flags: Vec<u32> = self.buffers.read_buffer_as(
-            device,
-            queue,
-            &self.buffers.compaction_flags,
-            last_idx + 1,
-        ).await;
+        let data = slice.get_mapped_range();
+        let values: &[u32] = bytemuck::cast_slice(&data);
+        let new_count = values[0] + values[1];  // prefix_sum[last] + flag[last]
 
-        let new_count = compact_map[last_idx] + flags[last_idx];
+        drop(data);
+        staging.unmap();
+
         new_count
     }
 

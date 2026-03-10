@@ -496,10 +496,20 @@ pub async fn run(
             //     insert_list_before
             // );
 
-            // Dispatch GPU compaction (mark → invert → CPU prefix sum → scatter)
-            // Eliminates O(N²) linear search bottleneck!
-            // Returns (encoder, new_count) - encoder for buffer copies, new_count for tracking
-            let (mut encoder, new_count) = state.dispatch_compact_vertex_arrays(device, queue, num_uninserted, num_inserted).await;
+            // Adaptive compaction: choose fastest algorithm based on dataset size
+            // ATOMIC PATH: Fast for typical datasets (< 100k elements)
+            // PREFIX SUM PATH: Better for very large datasets (>= 100k elements)
+            let use_atomic = num_uninserted < 100_000;
+
+            let (mut encoder, new_count) = if use_atomic {
+                // FAST PATH: Atomic-based compaction (2 passes)
+                eprintln!("[COMPACT] Using atomic compaction for {} uninserted", num_uninserted);
+                state.dispatch_compact_vertex_arrays_atomic(device, queue, num_uninserted, num_inserted).await
+            } else {
+                // SLOW PATH: GPU prefix sum compaction (7 passes, optimized)
+                eprintln!("[COMPACT] Using prefix sum compaction for {} uninserted", num_uninserted);
+                state.dispatch_compact_vertex_arrays(device, queue, num_uninserted, num_inserted).await
+            };
             new_count_from_compact = new_count;  // Assign to outer variable
 
             // Copy compacted results from temp buffers back to main buffers
