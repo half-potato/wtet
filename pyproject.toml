@@ -1,0 +1,54 @@
+[build-system]
+requires = ["maturin>=1.0,<2.0"]
+build-backend = "maturin"
+
+[project]
+name = "gdel3d"
+version = "0.1.0"
+description = "GPU-accelerated 3D Delaunay triangulation using wgpu"
+readme = "PYTHON_BINDINGS.md"
+requires-python = ">=3.8"
+license = { text = "MIT OR Apache-2.0" }
+authors = [
+    { name = "gDel3D Contributors" }
+]
+keywords = ["delaunay", "triangulation", "3d", "gpu", "wgpu", "computational-geometry"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Science/Research",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Rust",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "numpy>=1.20",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=7.0",
+    "scipy>=1.7",
+    "maturin>=1.0",
+]
+
+[tool.maturin]
+python-source = "python"
+module-name = "gdel3d._core"
+features = ["python"]
+
+[tool.uv]
+# Configuration for uv package manager
+dev-dependencies = [
+    "pytest>=7.0",
+    "scipy>=1.7",
+]
+
+# Environment variables needed for building
+[tool.uv.env]
+PYO3_USE_ABI3_FORWARD_COMPATIBILITY = "1"

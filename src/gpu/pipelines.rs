@@ -88,6 +88,10 @@ pub struct Pipelines {
     pub compact_atomic_bind_group: wgpu::BindGroup,
     pub compact_atomic_params: wgpu::Buffer,
 
+    // Pipeline: zero compaction flags (GPU zeroing instead of CPU→GPU transfer)
+    pub zero_compaction_flags_pipeline: wgpu::ComputePipeline,
+    pub zero_compaction_flags_bind_group: wgpu::BindGroup,
+
     // Pipeline: compact vertex arrays (prefix-sum-based, 3 passes)
     pub compact_mark_inserted_pipeline: wgpu::ComputePipeline,
     pub compact_mark_inserted_bind_group: wgpu::BindGroup,
@@ -107,6 +111,11 @@ pub struct Pipelines {
     pub inclusive_to_exclusive_pipeline: wgpu::ComputePipeline,
     pub inclusive_to_exclusive_bind_group: wgpu::BindGroup,
     pub inclusive_to_exclusive_params: wgpu::Buffer,
+
+    // Pipeline: init tet_to_flip buffer (GPU initialization instead of CPU→GPU transfer)
+    pub init_tet_to_flip_pipeline: wgpu::ComputePipeline,
+    pub init_tet_to_flip_bind_group: wgpu::BindGroup,
+    pub init_tet_to_flip_params: wgpu::Buffer,
 
     // Pipeline: relocate points fast
     pub relocate_points_fast_pipeline: wgpu::ComputePipeline,
@@ -1164,12 +1173,48 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- zero_compaction_flags (GPU buffer zeroing) ---
+        let zero_compaction_flags_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("zero_compaction_flags.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/zero_compaction_flags.wgsl").into()),
+        });
+        let zero_compaction_flags_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("zero_compaction_flags_bgl"),
+            entries: &[
+                storage_rw_entry(0),  // flags
+                uniform_entry(1),     // params
+            ],
+        });
+        // Create a temporary params buffer for zero_compaction_flags (will share with compact_vertex_arrays)
+        let zero_compact_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let zero_compaction_flags_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("zero_compaction_flags_bg"),
+            layout: &zero_compaction_flags_bgl,
+            entries: &[
+                buf_entry(0, &bufs.compaction_flags),
+                buf_entry(1, &zero_compact_params),
+            ],
+        });
+        let zero_compaction_flags_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("zero_compaction_flags_pl"),
+            bind_group_layouts: &[&zero_compaction_flags_bgl],
+            immediate_size: 0,
+        });
+        let zero_compaction_flags_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("zero_compaction_flags"),
+            layout: Some(&zero_compaction_flags_pl),
+            module: &zero_compaction_flags_shader,
+            entry_point: Some("zero_flags"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- compact_vertex_arrays (prefix-sum-based, 3 passes) ---
         let compact_vertex_arrays_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("compact_vertex_arrays_new.wgsl"),
             source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/compact_vertex_arrays_new.wgsl").into()),
         });
-        let compact_vertex_arrays_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let compact_vertex_arrays_params = zero_compact_params;  // Reuse params buffer
 
         // Pass 1: mark_inserted
         let compact_mark_inserted_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
@@ -1380,6 +1425,41 @@ impl Pipelines {
             layout: Some(&inclusive_to_exclusive_pl),
             module: &inclusive_to_exclusive_shader,
             entry_point: Some("inclusive_to_exclusive"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- init_tet_to_flip (GPU buffer initialization) ---
+        let init_tet_to_flip_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("init_tet_to_flip.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/init_tet_to_flip.wgsl").into()),
+        });
+        let init_tet_to_flip_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let init_tet_to_flip_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("init_tet_to_flip_bgl"),
+            entries: &[
+                storage_rw_entry(0),  // tet_to_flip
+                uniform_entry(1),     // params
+            ],
+        });
+        let init_tet_to_flip_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("init_tet_to_flip_bg"),
+            layout: &init_tet_to_flip_bgl,
+            entries: &[
+                buf_entry(0, &bufs.tet_to_flip),
+                buf_entry(1, &init_tet_to_flip_params),
+            ],
+        });
+        let init_tet_to_flip_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("init_tet_to_flip_pl"),
+            bind_group_layouts: &[&init_tet_to_flip_bgl],
+            immediate_size: 0,
+        });
+        let init_tet_to_flip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("init_tet_to_flip"),
+            layout: Some(&init_tet_to_flip_pl),
+            module: &init_tet_to_flip_shader,
+            entry_point: Some("init_tet_to_flip"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1673,6 +1753,8 @@ impl Pipelines {
             compact_atomic_pipeline,
             compact_atomic_bind_group,
             compact_atomic_params,
+            zero_compaction_flags_pipeline,
+            zero_compaction_flags_bind_group,
             compact_mark_inserted_pipeline,
             compact_mark_inserted_bind_group,
             compact_invert_flags_pipeline,
@@ -1689,6 +1771,9 @@ impl Pipelines {
             inclusive_to_exclusive_pipeline,
             inclusive_to_exclusive_bind_group,
             inclusive_to_exclusive_params,
+            init_tet_to_flip_pipeline,
+            init_tet_to_flip_bind_group,
+            init_tet_to_flip_params,
             relocate_points_fast_pipeline,
             relocate_points_fast_params,
             update_opp_pipeline,

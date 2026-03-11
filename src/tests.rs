@@ -2231,3 +2231,111 @@ fn test_update_opp_shader_compiles() {
         eprintln!("  [{:?}] {}", msg.message_type, msg.message);
     }
 }
+
+/// Benchmark: Run 200k point test with multiple seeds for consistent performance measurement
+/// This test runs multiple iterations with different seeds to:
+/// 1. Verify consistent performance across different point distributions
+/// 2. Detect any variance or outliers
+/// 3. Provide reproducible benchmarking results
+///
+/// Run with: cargo test --release benchmark_200k_multi_seed -- --nocapture --ignored
+#[test]
+#[ignore] // Ignored by default (use --ignored to run)
+fn benchmark_200k_multi_seed() {
+    // Fixed seeds for reproducibility
+    let seeds = [
+        12345,  // Seed 1
+        54321,  // Seed 2
+        99999,  // Seed 3
+        42424,  // Seed 4
+        77777,  // Seed 5
+        11111,  // Seed 6
+        88888,  // Seed 7
+        33333,  // Seed 8
+        66666,  // Seed 9
+        99991,  // Seed 10
+    ];
+
+    eprintln!("\n========================================");
+    eprintln!("BENCHMARK: 200k Points - Multi-Seed Test");
+    eprintln!("========================================");
+    eprintln!("Running {} iterations with fixed seeds for reproducibility\n", seeds.len());
+
+    let mut timings = Vec::new();
+
+    with_gpu(|device, queue| {
+        for (i, &seed) in seeds.iter().enumerate() {
+            eprintln!("--- Iteration {} (seed={}) ---", i + 1, seed);
+            
+            // Generate points with this seed
+            let points = gen_uniform_random(200_000, seed);
+            let config = GDelConfig::default();
+            
+            // Measure time
+            let start = std::time::Instant::now();
+            let (normalized, result) = run_delaunay(device, queue, &points, &config);
+            let elapsed = start.elapsed();
+            
+            // Validate correctness
+            let v = validate_full(&normalized, &result.tets, &result.adjacency);
+            assert!(v.is_ok(), "Seed {} failed validation: {}", seed, v.unwrap_err());
+            
+            let elapsed_ms = elapsed.as_secs_f64() * 1000.0;
+            timings.push(elapsed_ms);
+            
+            eprintln!("  Time: {:.2} ms", elapsed_ms);
+            eprintln!("  Tets: {}", result.tets.len());
+            eprintln!();
+        }
+    });
+
+    // Calculate statistics
+    let count = timings.len() as f64;
+    let sum: f64 = timings.iter().sum();
+    let mean = sum / count;
+    
+    let variance = timings.iter()
+        .map(|&t| (t - mean).powi(2))
+        .sum::<f64>() / count;
+    let stddev = variance.sqrt();
+    
+    let min = timings.iter().copied().fold(f64::INFINITY, f64::min);
+    let max = timings.iter().copied().fold(f64::NEG_INFINITY, f64::max);
+    
+    // Sort for median and percentiles
+    let mut sorted = timings.clone();
+    sorted.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let median = sorted[sorted.len() / 2];
+    let p95 = sorted[(sorted.len() as f64 * 0.95) as usize];
+    
+    // Print results
+    eprintln!("\n========================================");
+    eprintln!("BENCHMARK RESULTS");
+    eprintln!("========================================");
+    eprintln!("Iterations:  {}", seeds.len());
+    eprintln!("Seeds:       {:?}", seeds);
+    eprintln!("\nTiming Statistics (ms):");
+    eprintln!("  Mean:      {:.2}", mean);
+    eprintln!("  Median:    {:.2}", median);
+    eprintln!("  Std Dev:   {:.2}", stddev);
+    eprintln!("  Min:       {:.2}", min);
+    eprintln!("  Max:       {:.2}", max);
+    eprintln!("  P95:       {:.2}", p95);
+    eprintln!("  Range:     {:.2}", max - min);
+    eprintln!("  CV:        {:.2}%", (stddev / mean) * 100.0); // Coefficient of variation
+    eprintln!("\nAll timings (ms):");
+    for (i, &time) in timings.iter().enumerate() {
+        eprintln!("  Seed {:5} → {:.2} ms", seeds[i], time);
+    }
+    eprintln!("\nReproducibility: Use any seed from the list to reproduce specific run");
+    eprintln!("Example: let points = gen_uniform_random(200_000, 12345);");
+    eprintln!("========================================\n");
+    
+    // Assert reasonable performance consistency
+    // CV (coefficient of variation) should be < 20% for consistent performance
+    let cv_percent = (stddev / mean) * 100.0;
+    assert!(cv_percent < 20.0, 
+        "Performance variance too high! CV={:.1}% (expected <20%)", cv_percent);
+    
+    eprintln!("✓ Performance consistency verified (CV={:.1}% < 20%)", cv_percent);
+}

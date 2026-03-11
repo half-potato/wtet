@@ -431,15 +431,31 @@ pub async fn run(
             if total_flips > 0 {
                 state.cpu_profiler.begin("8_relocate");
                 // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
-                // OPTIMIZATION: Only initialize active portion [0, current_tet_num) instead of full max_tets buffer
-                // For 2M points: current_tet_num ~5-10M, max_tets ~16M → saves 24-44MB CPU→GPU transfer
-                let current_tets = state.current_tet_num as usize;
-                let init_data = vec![-1i32; current_tets];
-                queue.write_buffer(&state.buffers.tet_to_flip, 0, bytemuck::cast_slice(&init_data));
+                // OPTIMIZATION: Use GPU shader instead of CPU vec allocation + transfer
+                // Old: vec![-1i32; current_tets] + write_buffer = 20MB+ CPU→GPU transfer per call
+                // New: GPU shader = ~0.1ms, eliminates 100+ MB of transfers per run
+                let current_tets = state.current_tet_num;
 
-                // BATCHED: Build all flip traces + relocate in single submission
+                queue.write_buffer(
+                    &state.pipelines.init_tet_to_flip_params,
+                    0,
+                    bytemuck::cast_slice(&[current_tets, 0u32, 0u32, 0u32]),
+                );
+
+                // BATCHED: Init buffer + build all flip traces + relocate in single submission
                 // Eliminates N submit/poll cycles (where N = number of flip batches)
                 let mut encoder = device.create_command_encoder(&Default::default());
+
+                // GPU initialization of tet_to_flip
+                {
+                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                        label: Some("init_tet_to_flip"),
+                        timestamp_writes: None,
+                    });
+                    pass.set_pipeline(&state.pipelines.init_tet_to_flip_pipeline);
+                    pass.set_bind_group(0, Some(&state.pipelines.init_tet_to_flip_bind_group), &[]);
+                    pass.dispatch_workgroups((current_tets + 255) / 256, 1, 1);
+                }
 
                 // Build flip traces by iterating batches in REVERSE order
                 let mut next_flip_num = total_flips;
@@ -466,10 +482,12 @@ pub async fn run(
         state.cpu_profiler.begin("9_compact");
         let new_count_from_compact;  // Declare outside block
         {
-            // Adaptive compaction: choose fastest algorithm based on dataset size
-            // ATOMIC PATH: Fast for typical datasets (< 100k elements)
-            // PREFIX SUM PATH: Better for very large datasets (>= 100k elements)
-            let use_atomic = num_uninserted < 100_000;
+            // Adaptive compaction: choose fastest algorithm based on actual work
+            // ATOMIC PATH: O(N×M) - fast when work is low (N×M < 10M operations)
+            // PREFIX SUM PATH: O(N+M) - better when work is high (higher overhead but scales linearly)
+            // Old threshold: num_uninserted < 100_000 (ignored M, causing bad choices)
+            // New threshold: N×M < 10_000_000 (considers actual operation count)
+            let use_atomic = (num_uninserted as u64 * num_inserted as u64) < 10_000_000;
 
             let (mut encoder, new_count) = if use_atomic {
                 // FAST PATH: Atomic-based compaction (2 passes)
@@ -504,10 +522,10 @@ pub async fn run(
 
         // Use new_count from compaction (no need to read counters anymore)
         let new_count = new_count_from_compact;
-        // println!(
-        //     "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
-        //     iteration, num_uninserted, num_inserted, new_count
-        // );
+        println!(
+            "[DEBUG_COMPACT] Iteration {}: num_uninserted={}, num_inserted={}, new_count={}",
+            iteration, num_uninserted, num_inserted, new_count
+        );
 
         // Update CPU state (count only, array stays on GPU)
         state.num_uninserted = new_count;

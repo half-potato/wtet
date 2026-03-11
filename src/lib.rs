@@ -12,6 +12,9 @@ pub mod profiler;
 pub mod morton;
 pub mod hilbert;
 
+#[cfg(feature = "python")]
+pub mod python;
+
 use types::{DelaunayResult, GDelConfig};
 
 /// Returns the minimum wgpu limits required by gdel3d_wgpu.

@@ -4,7 +4,17 @@ version = "0.1.0"
 edition = "2021"
 description = "GPU-accelerated 3D Delaunay triangulation using wgpu compute shaders"
 
+[lib]
+name = "gdel3d_wgpu"
+crate-type = ["cdylib", "rlib"]
+
 [dependencies]
+# Python bindings
+pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
+numpy = { version = "0.23", optional = true }
+ndarray = { version = "0.16", optional = true }
+
+# Core dependencies
 wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
 glam = "0.29"
@@ -16,3 +26,7 @@ hilbert_index = "0.2.0"
 [dev-dependencies]
 env_logger = "0.11"
 rand = "0.8"
+
+[features]
+default = []
+python = ["pyo3", "numpy", "ndarray"]
