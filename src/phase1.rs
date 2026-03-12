@@ -226,8 +226,17 @@ pub async fn run(
                     break;
                 }
 
-                // Reset compaction counters
-                state.reset_inserted_counter(queue); // Reuse for compaction counters
+                // Reset ALL counters used by flip collection + compaction
+                // counters[0] = collection count (used by CollectCompact via atomicAdd in mark_rejected_flips)
+                // counters[1] = compact count (used by MarkCompact)
+                // counters[2] = inserted count
+                // CRITICAL: counters[0] MUST be reset here, otherwise stale values from
+                // previous compaction bleed into the flip count, causing overflow and GPU hang.
+                queue.write_buffer(
+                    &state.buffers.counters,
+                    0,
+                    bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
+                );
 
                 // BATCHED: Check → Validate → Compact
                 // Eliminates 2 submit/poll cycles per flip iteration
@@ -339,8 +348,13 @@ pub async fn run(
                         break;
                     }
 
-                    // Reset compaction counters
-                    state.reset_inserted_counter(queue);
+                    // Reset ALL counters used by flip collection + compaction
+                    // (same fix as fast flip loop - counters[0] must be zeroed)
+                    queue.write_buffer(
+                        &state.buffers.counters,
+                        0,
+                        bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
+                    );
 
                     // BATCHED: Check → Validate → Compact
                     // Eliminates 2 submit/poll cycles per flip iteration
