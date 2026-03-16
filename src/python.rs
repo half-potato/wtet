@@ -1,7 +1,7 @@
 //! Python bindings for gdel3d_wgpu using PyO3 and NumPy.
 
 use pyo3::prelude::*;
-use numpy::{PyArray1, PyArray2, PyReadonlyArray2};
+use numpy::{PyArray1, PyArray2, PyArrayMethods, PyReadonlyArray2};
 use std::sync::OnceLock;
 use crate::{delaunay_3d, required_limits};
 use crate::types::{GDelConfig, InsertionRule};
@@ -34,7 +34,7 @@ fn get_device() -> PyResult<&'static (wgpu::Device, wgpu::Queue)> {
         let (device, queue) = pollster::block_on(
             adapter.request_device(&wgpu::DeviceDescriptor {
                 label: Some("gdel3d_device"),
-                required_features: wgpu::Features::empty(),
+                required_features: wgpu::Features::SUBGROUP | wgpu::Features::SHADER_FLOAT32_ATOMIC | wgpu::Features::TIMESTAMP_QUERY | wgpu::Features::SHADER_FLOAT32_ATOMIC,
                 required_limits: limits,
                 memory_hints: Default::default(),
                 experimental_features: Default::default(),
@@ -215,7 +215,7 @@ fn delaunay<'py>(
     for tet in &result.tets {
         tets_flat.extend_from_slice(tet);
     }
-    let tets_array = PyArray2::from_vec2_bound(
+    let tets_array = PyArray2::from_vec2(
         py,
         &result.tets.iter().map(|t| t.to_vec()).collect::<Vec<_>>(),
     ).map_err(|e| {
@@ -225,7 +225,7 @@ fn delaunay<'py>(
     })?;
 
     // Convert adjacency Vec<[u32; 4]> to (M, 4) array
-    let adj_array = PyArray2::from_vec2_bound(
+    let adj_array = PyArray2::from_vec2(
         py,
         &result.adjacency.iter().map(|a| a.to_vec()).collect::<Vec<_>>(),
     ).map_err(|e| {
@@ -235,7 +235,7 @@ fn delaunay<'py>(
     })?;
 
     // Convert failed_verts Vec<u32> to (K,) array
-    let failed_array = PyArray1::from_vec_bound(py, result.failed_verts);
+    let failed_array = PyArray1::from_vec(py, result.failed_verts);
 
     Bound::new(
         py,
@@ -269,6 +269,73 @@ fn decode_adjacency(packed: u32) -> (u32, u32) {
 #[pyfunction]
 fn encode_adjacency(tet_idx: u32, face_idx: u32) -> u32 {
     (tet_idx << 5) | (face_idx & 3)
+}
+
+/// Check Delaunay quality of a triangulation result.
+///
+/// Returns (num_violations, num_interior_tets) where:
+/// - num_violations: number of insphere violations among interior tet pairs
+/// - num_interior_tets: number of tets with only real (non-super-tet) vertices
+///
+/// Only checks pairs where both tets have all vertices in [0, num_points).
+/// Super-tet boundary pairs are skipped to avoid false positives.
+#[pyfunction]
+fn check_quality<'py>(
+    py: Python<'py>,
+    points: PyReadonlyArray2<'py, f32>,
+    result: &PyDelaunayResult,
+) -> PyResult<(usize, usize)> {
+    let points_ref = points.as_array();
+    let shape = points_ref.shape();
+    if shape.len() != 2 || shape[1] != 3 {
+        return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(
+            format!("Points must have shape (N, 3), got {:?}", shape),
+        ));
+    }
+    let num_points = shape[0];
+
+    // Convert points to Vec<[f32; 3]>
+    let mut points_vec: Vec<[f32; 3]> = Vec::with_capacity(num_points);
+    for i in 0..num_points {
+        points_vec.push([
+            points_ref[[i, 0]],
+            points_ref[[i, 1]],
+            points_ref[[i, 2]],
+        ]);
+    }
+
+    // Normalize points (same normalization as delaunay_3d uses internally)
+    let (normalized, _, _) = crate::normalize_points(&points_vec);
+    let num_real = normalized.len() as u32;
+
+    // Extract tets and adjacency as flat Vec, then reshape to [u32; 4]
+    let tets_bound = result.tets.bind(py).clone();
+    let adj_bound = result.adjacency.bind(py).clone();
+    let tets_flat: Vec<u32> = tets_bound.to_vec().map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read tets: {}", e))
+    })?;
+    let adj_flat: Vec<u32> = adj_bound.to_vec().map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(format!("Failed to read adjacency: {}", e))
+    })?;
+
+    let num_tets = result.num_tets_cached;
+    let mut tets: Vec<[u32; 4]> = Vec::with_capacity(num_tets);
+    let mut adjacency: Vec<[u32; 4]> = Vec::with_capacity(num_tets);
+    for i in 0..num_tets {
+        tets.push([tets_flat[i * 4], tets_flat[i * 4 + 1], tets_flat[i * 4 + 2], tets_flat[i * 4 + 3]]);
+        adjacency.push([adj_flat[i * 4], adj_flat[i * 4 + 1], adj_flat[i * 4 + 2], adj_flat[i * 4 + 3]]);
+    }
+
+    // Count interior tets
+    let interior_tets = tets.iter()
+        .filter(|t| t.iter().all(|&v| v < num_real))
+        .count();
+
+    // Run Delaunay quality check
+    let violations = crate::check_delaunay_quality(&normalized, &tets, &adjacency, num_real)
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyRuntimeError, _>(e))?;
+
+    Ok((violations, interior_tets))
 }
 
 /// Initialize GPU device explicitly (optional, auto-called on first use).
@@ -308,9 +375,12 @@ fn gpu_info() -> PyResult<String> {
 // ============================================================================
 
 #[pymodule]
-fn gdel3d(m: &Bound<'_, PyModule>) -> PyResult<()> {
+fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // Main function
     m.add_function(wrap_pyfunction!(delaunay, m)?)?;
+
+    // Quality check
+    m.add_function(wrap_pyfunction!(check_quality, m)?)?;
 
     // GPU management
     m.add_function(wrap_pyfunction!(initialize_gpu, m)?)?;

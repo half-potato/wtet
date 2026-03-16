@@ -15,7 +15,74 @@ pub mod hilbert;
 #[cfg(feature = "python")]
 pub mod python;
 
-use types::{DelaunayResult, GDelConfig};
+use types::{DelaunayResult, GDelConfig, INVALID, decode_opp};
+
+/// Check Delaunay property for interior tet pairs only (skip super-tet vertices).
+///
+/// Super-tet vertices use large finite coordinates that can cause false
+/// insphere results, so we only check pairs where both tets are fully interior.
+/// Returns `Ok(num_violations)` or `Err` on structural problems.
+pub fn check_delaunay_quality(
+    points: &[[f32; 3]],
+    tets: &[[u32; 4]],
+    adjacency: &[[u32; 4]],
+    num_real_points: u32,
+) -> Result<usize, String> {
+    let pts64: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+        .collect();
+
+    let mut violations = 0;
+    for ti in 0..tets.len() {
+        if tets[ti].iter().any(|&v| v >= num_real_points) {
+            continue;
+        }
+        for f in 0..4u32 {
+            let packed = adjacency[ti][f as usize];
+            if packed == INVALID {
+                continue;
+            }
+            let (opp_ti, opp_f) = decode_opp(packed);
+            if ti >= opp_ti as usize {
+                continue;
+            }
+            if opp_ti as usize >= tets.len() {
+                return Err(format!(
+                    "Tet {ti} face {f}: neighbor {opp_ti} out of range (len={})",
+                    tets.len()
+                ));
+            }
+            if tets[opp_ti as usize].iter().any(|&v| v >= num_real_points) {
+                continue;
+            }
+
+            let tet = tets[ti];
+            let opp_tet = tets[opp_ti as usize];
+            let vb = opp_tet[opp_f as usize];
+
+            let pa = pts64[tet[0] as usize];
+            let pb = pts64[tet[1] as usize];
+            let pc = pts64[tet[2] as usize];
+            let pd = pts64[tet[3] as usize];
+            let pe = pts64[vb as usize];
+
+            let orient = predicates::orient3d(pa, pb, pc, pd);
+            let insph = if orient > 0.0 {
+                predicates::insphere(pa, pb, pc, pd, pe)
+            } else if orient < 0.0 {
+                -predicates::insphere(pa, pc, pb, pd, pe)
+            } else {
+                continue;
+            };
+
+            if insph > 0.0 {
+                violations += 1;
+            }
+        }
+    }
+    Ok(violations)
+}
 
 /// Returns the minimum wgpu limits required by gdel3d_wgpu.
 pub fn required_limits() -> wgpu::Limits {

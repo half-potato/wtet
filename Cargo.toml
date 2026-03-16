@@ -6,18 +6,18 @@ description = "GPU-accelerated 3D Delaunay triangulation using wgpu compute shad
 
 [lib]
 name = "gdel3d_wgpu"
-crate-type = ["cdylib", "rlib"]
+crate-type = ["rlib"]
 
 [dependencies]
 # Python bindings
-pyo3 = { version = "0.23", features = ["extension-module"], optional = true }
-numpy = { version = "0.23", optional = true }
+pyo3 = { version = "0.28.2", features = ["extension-module"], optional = true }
+numpy = { version = "0.28", optional = true }
 ndarray = { version = "0.16", optional = true }
 
 # Core dependencies
 wgpu = "28"
 bytemuck = { version = "1", features = ["derive"] }
-glam = "0.29"
+glam = "0.32"
 pollster = "0.4"
 log = "0.4"
 futures-channel = "0.3"

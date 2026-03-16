@@ -3,7 +3,7 @@ requires = ["maturin>=1.0,<2.0"]
 build-backend = "maturin"
 
 [project]
-name = "gdel3d"
+name = "wtet"
 version = "0.1.0"
 description = "GPU-accelerated 3D Delaunay triangulation using wgpu"
 readme = "PYTHON_BINDINGS.md"
@@ -39,7 +39,7 @@ dev = [
 
 [tool.maturin]
 python-source = "python"
-module-name = "gdel3d._core"
+module-name = "wtet._core"
 features = ["python"]
 
 [tool.uv]

@@ -597,7 +597,6 @@ fn test_diamond_flip_cpu() {
 // ============================================================================
 
 #[test]
-#[ignore = "Test has off-by-one indexing bug"]
 fn test_flip_improves_quality() {
     // Compare insphere violations with and without flipping on cube points
     with_gpu(|device, queue| {
@@ -613,6 +612,7 @@ fn test_flip_improves_quality() {
         ];
 
         let (normalized, _, _) = crate::normalize_points(&points);
+        let num_real = normalized.len() as u32;
 
         // Without flipping
         let config_no_flip = GDelConfig {
@@ -624,7 +624,7 @@ fn test_flip_improves_quality() {
             pollster::block_on(crate::gpu::GpuState::new(device, queue, &normalized, &config_no_flip));
         pollster::block_on(crate::phase1::run(device, queue, &mut state_nf, &config_no_flip));
         let result_nf = pollster::block_on(state_nf.readback(device, queue));
-        let violations_nf = count_insphere_violations(&normalized, &result_nf);
+        let violations_nf = count_insphere_violations(&normalized, &result_nf, num_real);
 
         // With flipping
         let config_flip = GDelConfig {
@@ -636,7 +636,7 @@ fn test_flip_improves_quality() {
             pollster::block_on(crate::gpu::GpuState::new(device, queue, &normalized, &config_flip));
         pollster::block_on(crate::phase1::run(device, queue, &mut state_f, &config_flip));
         let result_f = pollster::block_on(state_f.readback(device, queue));
-        let violations_f = count_insphere_violations(&normalized, &result_f);
+        let violations_f = count_insphere_violations(&normalized, &result_f, num_real);
 
         // Flipping should not increase violations
         assert!(
@@ -649,7 +649,11 @@ fn test_flip_improves_quality() {
 }
 
 #[cfg(test)]
-fn count_insphere_violations(points: &[[f32; 3]], result: &crate::types::DelaunayResult) -> usize {
+fn count_insphere_violations(
+    points: &[[f32; 3]],
+    result: &crate::types::DelaunayResult,
+    num_real_points: u32,
+) -> usize {
     let pts64: Vec<[f64; 3]> = points
         .iter()
         .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
@@ -657,6 +661,10 @@ fn count_insphere_violations(points: &[[f32; 3]], result: &crate::types::Delauna
 
     let mut count = 0;
     for ti in 0..result.tets.len() {
+        // Skip tets with super-tet vertices
+        if result.tets[ti].iter().any(|&v| v >= num_real_points) {
+            continue;
+        }
         for f in 0..4u32 {
             let packed = result.adjacency[ti][f as usize];
             if packed == INVALID {
@@ -669,11 +677,13 @@ fn count_insphere_violations(points: &[[f32; 3]], result: &crate::types::Delauna
             if opp_ti as usize >= result.tets.len() {
                 continue;
             }
+            // Skip if opposite tet has super-tet vertices
+            if result.tets[opp_ti as usize].iter().any(|&v| v >= num_real_points) {
+                continue;
+            }
 
             let tet = result.tets[ti];
             let opp_tet = result.tets[opp_ti as usize];
-
-            let _va = tet[f as usize];
             let vb = opp_tet[opp_f as usize];
 
             let pa = pts64[tet[0] as usize];
@@ -697,6 +707,82 @@ fn count_insphere_violations(points: &[[f32; 3]], result: &crate::types::Delauna
         }
     }
     count
+}
+
+// ============================================================================
+// Delaunay quality validation
+// ============================================================================
+
+#[test]
+fn test_wtet_delaunay_quality_uniform() {
+    with_gpu(|device, queue| {
+        let points = gen_uniform_random(200, 12345);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+
+        let num_real = normalized.len() as u32;
+        let violations = check_delaunay_interior(
+            &normalized, &result.tets, &result.adjacency, num_real,
+        ).expect("Structural error in Delaunay check");
+
+        let interior_tets = result.tets.iter()
+            .filter(|t| t.iter().all(|&v| v < num_real))
+            .count();
+        eprintln!("Uniform 200: {} total tets, {} interior tets, {} violations",
+            result.tets.len(), interior_tets, violations);
+
+        assert_eq!(violations, 0,
+            "wtet produced {} Delaunay violations on 200 uniform points",
+            violations);
+    });
+}
+
+#[test]
+fn test_wtet_delaunay_quality_grid() {
+    with_gpu(|device, queue| {
+        let points = gen_grid(5, 5, 5); // 125 points, cospherical degeneracies
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+
+        let num_real = normalized.len() as u32;
+        let violations = check_delaunay_interior(
+            &normalized, &result.tets, &result.adjacency, num_real,
+        ).expect("Structural error in Delaunay check");
+
+        let interior_tets = result.tets.iter()
+            .filter(|t| t.iter().all(|&v| v < num_real))
+            .count();
+        eprintln!("Grid 5x5x5: {} total tets, {} interior tets, {} violations",
+            result.tets.len(), interior_tets, violations);
+
+        assert_eq!(violations, 0,
+            "wtet produced {} Delaunay violations on 5x5x5 grid",
+            violations);
+    });
+}
+
+#[test]
+fn test_wtet_delaunay_quality_sphere() {
+    with_gpu(|device, queue| {
+        let points = gen_sphere_shell(150, 99999);
+        let config = GDelConfig::default();
+        let (normalized, result) = run_delaunay(device, queue, &points, &config);
+
+        let num_real = normalized.len() as u32;
+        let violations = check_delaunay_interior(
+            &normalized, &result.tets, &result.adjacency, num_real,
+        ).expect("Structural error in Delaunay check");
+
+        let interior_tets = result.tets.iter()
+            .filter(|t| t.iter().all(|&v| v < num_real))
+            .count();
+        eprintln!("Sphere 150: {} total tets, {} interior tets, {} violations",
+            result.tets.len(), interior_tets, violations);
+
+        assert_eq!(violations, 0,
+            "wtet produced {} Delaunay violations on 150 sphere shell points",
+            violations);
+    });
 }
 
 // ============================================================================
@@ -969,23 +1055,30 @@ fn check_delaunay(
     Ok(violations)
 }
 
-/// Validate adjacency consistency of the output.
+/// Validate adjacency consistency and Delaunay property of the output.
 ///
-/// Note: This is the primary validation after readback. The full gdel3D
-/// 4-check harness (Euler, orientation, adjacency, Delaunay) can't run
-/// on the stripped output because:
-///   - Euler requires the closed manifold (with super-tet) for V-E+F-T=0
-///   - Orientation isn't guaranteed uniform by the GPU phase
-///   - rebuild_adjacency creates artificial neighbors (faces exposed by
-///     super-tet removal get re-linked), causing false insphere violations
-/// Individual checks are available as standalone functions.
+/// Checks:
+///   1. Adjacency consistency (symmetric neighbor links)
+///   2. Delaunay property for interior tet pairs (skips super-tet vertices)
+///
+/// Note: Euler and orientation checks cannot run on stripped output
+/// (Euler requires the closed manifold, orientation isn't guaranteed by GPU).
 #[cfg(test)]
 fn validate_full(
-    _points: &[[f32; 3]],
+    points: &[[f32; 3]],
     tets: &[[u32; 4]],
     adjacency: &[[u32; 4]],
 ) -> Result<(), String> {
-    check_adjacency_consistency(tets, adjacency)
+    check_adjacency_consistency(tets, adjacency)?;
+    let num_real_points = points.len() as u32;
+    let violations = check_delaunay_interior(points, tets, adjacency, num_real_points)?;
+    if violations > 0 {
+        return Err(format!(
+            "Delaunay: {} insphere violations among interior pairs",
+            violations
+        ));
+    }
+    Ok(())
 }
 
 // ============================================================================
@@ -1459,7 +1552,6 @@ fn test_config_no_flip_with_splay() {
 }
 
 #[test]
-#[ignore = "Test has off-by-one indexing bug"]
 fn test_config_flip_only() {
     with_gpu(|device, queue| {
         let points = gen_uniform_random(50, 55555);
@@ -1470,10 +1562,10 @@ fn test_config_flip_only() {
         };
         let (normalized, result) = run_delaunay(device, queue, &points, &config);
         assert!(!result.tets.is_empty(), "Should produce tets");
-        // Without splaying, some violations may remain. Just verify adjacency.
         check_adjacency_consistency(&result.tets, &result.adjacency)
             .expect("Adjacency check failed");
-        let violations = check_delaunay(&normalized, &result.tets, &result.adjacency)
+        let num_real = normalized.len() as u32;
+        let violations = check_delaunay_interior(&normalized, &result.tets, &result.adjacency, num_real)
             .expect("Delaunay check structural error");
         eprintln!(
             "Flip-only: {} Delaunay violations on 50 points",
@@ -2102,8 +2194,7 @@ fn check_euler_closed(tets: &[[u32; 4]]) -> Result<(), String> {
 }
 
 /// Check Delaunay property for interior tet pairs only (skip super-tet vertices).
-/// Super-tet vertices use large finite coordinates that can cause false
-/// insphere results, so we only check pairs where both tets are fully interior.
+/// Delegates to the public `check_delaunay_quality` in lib.rs.
 #[cfg(test)]
 fn check_delaunay_interior(
     points: &[[f32; 3]],
@@ -2111,65 +2202,7 @@ fn check_delaunay_interior(
     adjacency: &[[u32; 4]],
     num_real_points: u32,
 ) -> Result<usize, String> {
-    let pts64: Vec<[f64; 3]> = points
-        .iter()
-        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
-        .collect();
-
-    let mut violations = 0;
-    for ti in 0..tets.len() {
-        // Skip tets with super-tet vertices
-        if tets[ti].iter().any(|&v| v >= num_real_points) {
-            continue;
-        }
-        for f in 0..4u32 {
-            let packed = adjacency[ti][f as usize];
-            if packed == INVALID {
-                continue;
-            }
-            let (opp_ti, opp_f) = decode_opp(packed);
-            if ti >= opp_ti as usize {
-                continue;
-            }
-            if opp_ti as usize >= tets.len() {
-                return Err(format!(
-                    "Tet {ti} face {f}: neighbor {opp_ti} out of range (len={})",
-                    tets.len()
-                ));
-            }
-            // Skip if opposite tet has super-tet vertex
-            if tets[opp_ti as usize]
-                .iter()
-                .any(|&v| v >= num_real_points)
-            {
-                continue;
-            }
-
-            let tet = tets[ti];
-            let opp_tet = tets[opp_ti as usize];
-            let vb = opp_tet[opp_f as usize];
-
-            let pa = pts64[tet[0] as usize];
-            let pb = pts64[tet[1] as usize];
-            let pc = pts64[tet[2] as usize];
-            let pd = pts64[tet[3] as usize];
-            let pe = pts64[vb as usize];
-
-            let orient = predicates::orient3d(pa, pb, pc, pd);
-            let insph = if orient > 0.0 {
-                predicates::insphere(pa, pb, pc, pd, pe)
-            } else if orient < 0.0 {
-                -predicates::insphere(pa, pc, pb, pd, pe)
-            } else {
-                continue;
-            };
-
-            if insph > 0.0 {
-                violations += 1;
-            }
-        }
-    }
-    Ok(violations)
+    crate::check_delaunay_quality(points, tets, adjacency, num_real_points)
 }
 
 /// Full gdel3D 4-check validation on raw GPU output.
