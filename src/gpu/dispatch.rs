@@ -474,11 +474,39 @@ impl GpuState {
         queue_size: u32,
         inf_idx: u32,
         use_alternate: bool,
+        org_flip_num: u32,
     ) {
+        self.dispatch_flip_impl(encoder, queue, queue_size, inf_idx, use_alternate, false, org_flip_num);
+    }
+
+    /// Dispatch flip check with exact DD predicates.
+    pub fn dispatch_flip_exact(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        queue_size: u32,
+        inf_idx: u32,
+        use_alternate: bool,
+        org_flip_num: u32,
+    ) {
+        self.dispatch_flip_impl(encoder, queue, queue_size, inf_idx, use_alternate, true, org_flip_num);
+    }
+
+    fn dispatch_flip_impl(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        queue_size: u32,
+        inf_idx: u32,
+        use_alternate: bool,
+        use_exact: bool,
+        org_flip_num: u32,
+    ) {
+        let exact_flag = if use_exact { 1u32 } else { 0u32 };
         queue.write_buffer(
             &self.pipelines.flip_params,
             0,
-            bytemuck::cast_slice(&[queue_size, inf_idx, 0u32, 0u32]),
+            bytemuck::cast_slice(&[queue_size, inf_idx, exact_flag, org_flip_num]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -567,11 +595,160 @@ impl GpuState {
                     binding: 11,
                     resource: self.buffers.block_owner.as_entire_binding(),
                 },
+                wgpu::BindGroupEntry {
+                    binding: 12,
+                    resource: self.buffers.tet_vote.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 13,
+                    resource: self.buffers.tet_msg_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 14,
+                    resource: self.buffers.flip_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 15,
+                    resource: self.buffers.encoded_face_vi_arr.as_entire_binding(),
+                },
             ],
         });
         pass.set_bind_group(0, Some(&bind_group), &[]);
 
         pass.dispatch_workgroups(div_ceil(queue_size, 256), 1, 1);
+    }
+
+    /// Dispatch flip vote phase (atomicMin voting to resolve concurrent flip conflicts).
+    /// CUDA Reference: voteForFlip23/voteForFlip32 in KerPredicates.cu:326-356
+    /// Must be dispatched in a separate compute pass BEFORE flip_check.
+    pub fn dispatch_flip_vote(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+        queue_size: u32,
+        inf_idx: u32,
+        use_alternate: bool,
+        use_exact: bool,
+        org_flip_num: u32,
+    ) {
+        let exact_flag = if use_exact { 1u32 } else { 0u32 };
+        queue.write_buffer(
+            &self.pipelines.flip_params,
+            0,
+            bytemuck::cast_slice(&[queue_size, inf_idx, exact_flag, org_flip_num]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("flip_vote"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.flip_vote_pipeline);
+
+        let (flip_queue_read, flip_queue_write) = if use_alternate {
+            (&self.buffers.flip_queue_next, &self.buffers.flip_queue)
+        } else {
+            (&self.buffers.flip_queue, &self.buffers.flip_queue_next)
+        };
+
+        let active_tets = self.current_tet_num.min(self.max_tets);
+        let (tets_size, tet_opp_size) = if self.use_partial_binding {
+            let size = (active_tets as u64) * 16;
+            let max_buffer_size = (self.max_tets as u64) * 16;
+            let capped_size = size.min(max_buffer_size);
+            (Some(wgpu::BufferSize::new(capped_size).unwrap()), Some(wgpu::BufferSize::new(capped_size).unwrap()))
+        } else {
+            (None, None)
+        };
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("flip_vote_bg"),
+            layout: &self.pipelines.flip_bgl,
+            entries: &[
+                wgpu::BindGroupEntry { binding: 0, resource: self.buffers.points.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.buffers.tets, offset: 0, size: tets_size }) },
+                wgpu::BindGroupEntry { binding: 2, resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding { buffer: &self.buffers.tet_opp, offset: 0, size: tet_opp_size }) },
+                wgpu::BindGroupEntry { binding: 3, resource: self.buffers.tet_info.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 4, resource: self.buffers.free_arr.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 5, resource: self.buffers.vert_free_arr.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 6, resource: self.buffers.counters.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 7, resource: flip_queue_read.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 8, resource: flip_queue_write.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 9, resource: self.buffers.flip_count.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 10, resource: self.pipelines.flip_params.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 11, resource: self.buffers.block_owner.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 12, resource: self.buffers.tet_vote.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 13, resource: self.buffers.tet_msg_arr.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 14, resource: self.buffers.flip_arr.as_entire_binding() },
+                wgpu::BindGroupEntry { binding: 15, resource: self.buffers.encoded_face_vi_arr.as_entire_binding() },
+            ],
+        });
+        pass.set_bind_group(0, Some(&bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(queue_size, 256), 1, 1);
+    }
+
+    /// Reset tet_vote to INT_MAX for flip voting (atomicMin).
+    /// Must be dispatched before each flip_vote pass.
+    pub fn dispatch_reset_flip_votes(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue) {
+        // Update params to ensure max_tets is correct
+        queue.write_buffer(
+            &self.pipelines.reset_votes_params,
+            0,
+            bytemuck::cast_slice(&[self.max_tets, 0u32, 0u32, 0u32]),
+        );
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("reset_flip_votes"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.reset_flip_votes_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.reset_votes_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(self.max_tets, 256), 1, 1);
+    }
+
+    /// Dispatch repair_adjacency pass after each flip iteration.
+    /// Fixes stale forward pointers and writes back-pointers using vertex matching.
+    pub fn dispatch_repair_adjacency(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        queue: &wgpu::Queue,
+    ) {
+        let total_tet_num = self.current_tet_num.min(self.max_tets);
+        queue.write_buffer(
+            &self.pipelines.repair_adjacency_params,
+            0,
+            bytemuck::cast_slice(&[total_tet_num, 0u32, 0u32, 0u32]),
+        );
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("repair_adjacency_bg"),
+            layout: &self.pipelines.repair_adjacency_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffers.tets.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.buffers.tet_opp.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.buffers.tet_info.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pipelines.repair_adjacency_params.as_entire_binding(),
+                },
+            ],
+        });
+
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+            label: Some("repair_adjacency"),
+            timestamp_writes: None,
+        });
+        pass.set_pipeline(&self.pipelines.repair_adjacency_pipeline);
+        pass.set_bind_group(0, Some(&bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(total_tet_num, 256), 1, 1);
     }
 
     /// Dispatch reset votes.
@@ -676,10 +853,11 @@ impl GpuState {
 
     /// Reset flip_count to 0.
     pub fn reset_flip_count(&self, queue: &wgpu::Queue) {
+        // Reset both flip_count[0] (next queue size) and flip_count[1] (metadata flip count)
         queue.write_buffer(
             &self.buffers.flip_count,
             0,
-            bytemuck::cast_slice(&[0u32]),
+            bytemuck::cast_slice(&[0u32, 0u32]),
         );
     }
 
@@ -787,6 +965,89 @@ impl GpuState {
             0
         };
         pass.dispatch_workgroups(div_ceil(count, 256), 1, 1);
+    }
+
+    /// Collect active tets (alive && changed) into act_tet_vec.
+    /// Equivalent to CUDA's thrust_copyIf_IsActiveTetra.
+    /// Returns the count of active tets (read from counters[0]).
+    pub async fn dispatch_collect_active_tets(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        total_tet_num: u32,
+    ) -> u32 {
+        self.dispatch_collect_active_tets_impl(device, queue, total_tet_num, false).await
+    }
+
+    /// Collect ALL alive tets (ignoring CHANGED flag).
+    /// Used for initial flip queue population where we need to check all tets.
+    pub async fn dispatch_collect_all_alive_tets(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        total_tet_num: u32,
+    ) -> u32 {
+        self.dispatch_collect_active_tets_impl(device, queue, total_tet_num, true).await
+    }
+
+    async fn dispatch_collect_active_tets_impl(
+        &self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        total_tet_num: u32,
+        collect_all: bool,
+    ) -> u32 {
+        // Reset counter[0] to 0
+        queue.write_buffer(
+            &self.buffers.counters,
+            0,
+            bytemuck::cast_slice(&[0u32]),
+        );
+        let collect_all_flag = if collect_all { 1u32 } else { 0u32 };
+        queue.write_buffer(
+            &self.pipelines.collect_active_tets_params,
+            0,
+            bytemuck::cast_slice(&[total_tet_num, collect_all_flag, 0u32, 0u32]),
+        );
+
+        let mut encoder = device.create_command_encoder(&Default::default());
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("collect_active_tets_bg"),
+            layout: &self.pipelines.collect_active_tets_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffers.tet_info.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.buffers.act_tet_vec.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.buffers.counters.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.pipelines.collect_active_tets_params.as_entire_binding(),
+                },
+            ],
+        });
+
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("collect_active_tets"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.pipelines.collect_active_tets_pipeline);
+            pass.set_bind_group(0, Some(&bind_group), &[]);
+            pass.dispatch_workgroups(div_ceil(total_tet_num, 256), 1, 1);
+        }
+
+        queue.submit(Some(encoder.finish()));
+        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+        self.buffers.read_collection_count(device, queue).await
     }
 
     /// Dispatch mark_special_tets (clears OPP_SPECIAL flags between fast/exact flipping).
@@ -948,23 +1209,15 @@ impl GpuState {
     }
 
     /// Dispatch update opp (CRITICAL - flip adjacency updates).
+    /// flip.wgsl stores metadata at LOCAL indices (0-based per round).
+    /// org_flip_num is used by the shader for tet_msg_arr staleness checks.
     pub fn dispatch_update_opp(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
+        if flip_num == 0 {
+            return;
+        }
         queue.write_buffer(&self.pipelines.update_opp_params, 0, bytemuck::cast_slice(&[org_flip_num, flip_num, 0u32, 0u32]));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("update_opp"), timestamp_writes: None });
         pass.set_pipeline(&self.pipelines.update_opp_pipeline);
-
-        // Create dynamic bind group
-        // CRITICAL: Cap binding size to actual buffer capacity (max_flips = max_tets/2)
-        let (offset, size) = if self.use_partial_binding {
-            let offset = (org_flip_num as u64) * 32; // FlipItem = 32 bytes
-            let requested_size = (flip_num as u64) * 32;
-            let max_flip_arr_size = (self.max_flips as u64) * 32;
-            // Cap size to remaining buffer space after offset
-            let capped_size = requested_size.min(max_flip_arr_size.saturating_sub(offset));
-            (offset, Some(wgpu::BufferSize::new(capped_size).unwrap()))
-        } else {
-            (0, None)
-        };
 
         let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
             label: Some("update_opp_bg_dynamic"),
@@ -972,11 +1225,7 @@ impl GpuState {
             entries: &[
                 wgpu::BindGroupEntry {
                     binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &self.buffers.flip_arr,
-                        offset,
-                        size,
-                    }),
+                    resource: self.buffers.flip_arr.as_entire_binding(),
                 },
                 wgpu::BindGroupEntry {
                     binding: 1,

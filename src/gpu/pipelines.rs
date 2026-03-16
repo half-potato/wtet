@@ -49,7 +49,9 @@ pub struct Pipelines {
     pub update_uninserted_vert_tet_bind_group: wgpu::BindGroup,
     pub update_uninserted_vert_tet_params: wgpu::Buffer,
 
-    // Pipeline: flip check
+    // Pipeline: flip vote (phase 1 - marks violations via atomicMin)
+    pub flip_vote_pipeline: wgpu::ComputePipeline,
+    // Pipeline: flip check (phase 2 - executes flips if vote won)
     pub flip_pipeline: wgpu::ComputePipeline,
     // flip_bind_group and flip_bind_group_b removed - now created dynamically at dispatch time
     pub flip_params: wgpu::Buffer,
@@ -58,6 +60,9 @@ pub struct Pipelines {
     pub reset_votes_pipeline: wgpu::ComputePipeline,
     pub reset_votes_bind_group: wgpu::BindGroup,
     pub reset_votes_params: wgpu::Buffer,
+
+    // Pipeline: reset flip votes (atomicMin, INT_MAX sentinel)
+    pub reset_flip_votes_pipeline: wgpu::ComputePipeline,
 
     // Pipeline: gather failed
     pub gather_pipeline: wgpu::ComputePipeline,
@@ -167,6 +172,16 @@ pub struct Pipelines {
     pub mark_special_tets_pipeline: wgpu::ComputePipeline,
     // mark_special_tets_bind_group removed - now created dynamically at dispatch time
     pub mark_special_tets_params: wgpu::Buffer,
+
+    // Pipeline: repair adjacency (post-flip back-pointer fix)
+    pub repair_adjacency_pipeline: wgpu::ComputePipeline,
+    pub repair_adjacency_bgl: wgpu::BindGroupLayout,
+    pub repair_adjacency_params: wgpu::Buffer,
+
+    // Pipeline: collect active tets (populate act_tet_vec before flipping)
+    pub collect_active_tets_pipeline: wgpu::ComputePipeline,
+    pub collect_active_tets_bgl: wgpu::BindGroupLayout,
+    pub collect_active_tets_params: wgpu::Buffer,
 
     // Pipeline: mark rejected flips
     pub mark_rejected_flips_pipeline: wgpu::ComputePipeline,
@@ -596,6 +611,7 @@ impl Pipelines {
                 storage_ro_entry(1),  // uninserted
                 storage_rw_entry(2),  // vert_tet
                 uniform_entry(3),     // params
+                storage_ro_entry(4),  // tet_opp (for adjacency walking)
             ],
         });
 
@@ -607,6 +623,7 @@ impl Pipelines {
                 buf_entry(1, &bufs.uninserted),
                 buf_entry(2, &bufs.vert_tet),
                 buf_entry(3, &update_uninserted_vert_tet_params),
+                buf_entry(4, &bufs.tet_opp),
             ],
         });
 
@@ -650,6 +667,10 @@ impl Pipelines {
                 storage_rw_entry(9),  // flip_count
                 uniform_entry(10),    // params
                 storage_ro_entry(11), // block_owner
+                storage_rw_entry(12), // tet_vote (for flip voting)
+                storage_rw_entry(13), // tet_msg_arr
+                storage_rw_entry(14), // flip_arr
+                storage_rw_entry(15), // encoded_face_vi_arr
             ],
         });
 
@@ -659,6 +680,15 @@ impl Pipelines {
             label: Some("flip_pl"),
             bind_group_layouts: &[&flip_bgl],
             immediate_size: 0,
+        });
+
+        let flip_vote_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("flip_vote"),
+            layout: Some(&flip_pl),
+            module: &flip_shader,
+            entry_point: Some("flip_vote"),
+            compilation_options: Default::default(),
+            cache: None,
         });
 
         let flip_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
@@ -713,6 +743,16 @@ impl Pipelines {
                 layout: Some(&reset_votes_pl),
                 module: &reset_votes_shader,
                 entry_point: Some("reset_votes"),
+                compilation_options: Default::default(),
+                cache: None,
+            });
+
+        let reset_flip_votes_pipeline =
+            device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+                label: Some("reset_flip_votes"),
+                layout: Some(&reset_votes_pl),
+                module: &reset_votes_shader,
+                entry_point: Some("reset_flip_votes"),
                 compilation_options: Default::default(),
                 cache: None,
             });
@@ -902,6 +942,64 @@ impl Pipelines {
             layout: Some(&mark_special_tets_pl),
             module: &mark_special_tets_shader,
             entry_point: Some("mark_special_tets"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        // --- Collect active tets (populate act_tet_vec before flipping) ---
+        // --- Repair adjacency pipeline ---
+        let repair_adjacency_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("repair_adjacency.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/repair_adjacency.wgsl").into()),
+        });
+        let repair_adjacency_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let repair_adjacency_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("repair_adjacency_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // tets
+                storage_rw_entry(1),  // tet_opp
+                storage_ro_entry(2),  // tet_info
+                uniform_entry(3),     // params
+            ],
+        });
+        let repair_adjacency_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("repair_adjacency_pl"),
+            bind_group_layouts: &[&repair_adjacency_bgl],
+            immediate_size: 0,
+        });
+        let repair_adjacency_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("repair_adjacency"),
+            layout: Some(&repair_adjacency_pl),
+            module: &repair_adjacency_shader,
+            entry_point: Some("repair_adjacency"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
+        let collect_active_tets_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("collect_active_tets.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/collect_active_tets.wgsl").into()),
+        });
+        let collect_active_tets_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let collect_active_tets_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("collect_active_tets_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // tet_info
+                storage_rw_entry(1),  // act_tet_vec
+                storage_rw_entry(2),  // counters
+                uniform_entry(3),     // params
+            ],
+        });
+        let collect_active_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("collect_active_tets_pl"),
+            bind_group_layouts: &[&collect_active_tets_bgl],
+            immediate_size: 0,
+        });
+        let collect_active_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("collect_active_tets"),
+            layout: Some(&collect_active_tets_pl),
+            module: &collect_active_tets_shader,
+            entry_point: Some("collect_active_tets"),
             compilation_options: Default::default(),
             cache: None,
         });
@@ -1734,11 +1832,13 @@ impl Pipelines {
             update_uninserted_vert_tet_pipeline,
             update_uninserted_vert_tet_bind_group,
             update_uninserted_vert_tet_params,
+            flip_vote_pipeline,
             flip_pipeline,
             flip_params,
             reset_votes_pipeline,
             reset_votes_bind_group,
             reset_votes_params,
+            reset_flip_votes_pipeline,
             gather_pipeline,
             gather_params,
             check_delaunay_fast_pipeline,
@@ -1805,6 +1905,12 @@ impl Pipelines {
             compact_tets_params,
             mark_special_tets_pipeline,
             mark_special_tets_params,
+            repair_adjacency_pipeline,
+            repair_adjacency_bgl,
+            repair_adjacency_params,
+            collect_active_tets_pipeline,
+            collect_active_tets_bgl,
+            collect_active_tets_params,
             mark_rejected_flips_pipeline,
             mark_rejected_flips_params,
             transform_pipeline,

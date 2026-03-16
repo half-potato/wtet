@@ -84,6 +84,28 @@ fn gather_failed(
     let tet = tets[tet_idx];
     let opp = tet_opp[tet_idx];
 
+    // Skip tets with super-tet vertices (their insphere results are unreliable)
+    var has_super = false;
+    for (var i = 0u; i < 4u; i++) {
+        if tet_vertex(tet, i) >= num_points {
+            has_super = true;
+        }
+    }
+    if has_super {
+        return;
+    }
+
+    // Load tet vertices
+    let p0 = points[tet.x].xyz;
+    let p1 = points[tet.y].xyz;
+    let p2 = points[tet.z].xyz;
+    let p3 = points[tet.w].xyz;
+
+    let orient = orient3d_simple(p0, p1, p2, p3);
+    if orient == 0.0 {
+        return; // Degenerate tet, skip
+    }
+
     // For each face, check if the opposite vertex violates Delaunay
     for (var f = 0u; f < 4u; f++) {
         let opp_packed = opp_entry(opp, f);
@@ -99,10 +121,8 @@ fn gather_failed(
             continue;
         }
 
-        // Check if this face has OPP_SPHERE_FAIL flag set (CUDA: KerDivision.cu:708)
-        // This flag is set by check_delaunay_exact when insphere test fails
-        if (opp_packed & OPP_SPHERE_FAIL) == 0u {
-            continue;  // No sphere failure on this face
+        if opp_tet_idx >= max_tets {
+            continue;
         }
 
         let opp_tet = tets[opp_tet_idx];
@@ -113,19 +133,19 @@ fn gather_failed(
             continue;
         }
 
-        // Also skip if any tet vertex is a super-tet vertex
-        var has_super = false;
-        for (var i = 0u; i < 4u; i++) {
-            if tet_vertex(tet, i) >= num_points {
-                has_super = true;
-            }
-        }
-        if has_super {
-            continue;
-        }
+        let pe = points[opposite_vert].xyz;
 
-        // Delaunay violation detected by flag! Mark the opposite vertex as failed.
-        let slot = atomicAdd(&counters[COUNTER_FAILED], 1u);
-        failed_verts[slot] = opposite_vert;
+        // Perform insphere test: positive result = violation
+        let insph = select(
+            -insphere_simple(p0, p2, p1, p3, pe),
+            insphere_simple(p0, p1, p2, p3, pe),
+            orient > 0.0
+        );
+
+        if insph > 0.0 {
+            // Delaunay violation! Mark the opposite vertex as failed.
+            let slot = atomicAdd(&counters[COUNTER_FAILED], 1u);
+            failed_verts[slot] = opposite_vert;
+        }
     }
 }

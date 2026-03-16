@@ -55,8 +55,9 @@ fn is_tet_changed(info: u32) -> bool {
 }
 
 fn is_opp_internal(opp: u32) -> bool {
-    let opp_tet = decode_opp_tet(opp);
-    return opp_tet == 0xFFFFFFFFu;
+    // Bit 2 = internal flag (CUDA: CommonTypes.h:322-324)
+    // Internal faces are between split sibling tets — already locally Delaunay.
+    return (opp & 4u) != 0u;
 }
 
 fn make_negative(val: i32) -> i32 {
@@ -90,16 +91,18 @@ fn make_vote_val(bot_ti: u32, flip_info: u32) -> i32 {
 }
 
 fn vote_for_flip23(vote_offset: u32, bot_ti: u32, top_ti: u32) {
-    let vote_val = i32(bot_ti);
-    atomicMin(&tet_vote_arr[vote_offset + bot_ti], vote_val);
-    atomicMin(&tet_vote_arr[vote_offset + top_ti], vote_val);
+    // CUDA: voteVal = voteOffset + botTi; atomicMin(&tetVoteArr[botTi], voteVal)
+    let vote_val = i32(vote_offset + bot_ti);
+    atomicMin(&tet_vote_arr[bot_ti], vote_val);
+    atomicMin(&tet_vote_arr[top_ti], vote_val);
 }
 
 fn vote_for_flip32(vote_offset: u32, bot_ti: u32, top_ti: u32, bot_opp_ti: u32) {
-    let vote_val = i32(bot_ti);
-    atomicMin(&tet_vote_arr[vote_offset + bot_ti], vote_val);
-    atomicMin(&tet_vote_arr[vote_offset + top_ti], vote_val);
-    atomicMin(&tet_vote_arr[vote_offset + bot_opp_ti], vote_val);
+    // CUDA: voteVal = voteOffset + botTi; atomicMin(&tetVoteArr[botTi/topTi/sideTi], voteVal)
+    let vote_val = i32(vote_offset + bot_ti);
+    atomicMin(&tet_vote_arr[bot_ti], vote_val);
+    atomicMin(&tet_vote_arr[top_ti], vote_val);
+    atomicMin(&tet_vote_arr[bot_opp_ti], vote_val);
 }
 
 fn orient3d_fast(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> i32 {

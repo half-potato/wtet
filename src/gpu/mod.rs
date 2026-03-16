@@ -228,19 +228,14 @@ impl GpuState {
                 continue;
             }
             let t = tets_raw[i];
-            // Skip tets containing infinity vertex (internal boundary representation)
-            // Keep tets with super-tet vertices (these form the actual convex hull)
-            if t.v[0] == inf_idx
-                || t.v[1] == inf_idx
-                || t.v[2] == inf_idx
-                || t.v[3] == inf_idx
-            {
-                continue;
-            }
-            // NEW: Filter out tets with all-zero or invalid vertices
+            // Keep ALL alive tets including infinity and super-tet tets.
+            // The CUDA code's compactTetras keeps all alive tets — removing infinity
+            // tets breaks the closed manifold needed by star splaying.
+            // Quality checks skip super-tet/infinity tets via the num_real_points filter.
+
+            // Filter out tets with all-zero or invalid vertices
             // (Prevents uninitialized tets from passing through)
             if t.v[0] == 0 && t.v[1] == 0 && t.v[2] == 0 && t.v[3] == 0 {
-                eprintln!("[READBACK] Skipping invalid tet {} with zero vertices", i);
                 continue;
             }
             // Also filter out tets with out-of-range vertices
@@ -249,10 +244,6 @@ impl GpuState {
                 || t.v[2] > num_points + 4
                 || t.v[3] > num_points + 4
             {
-                eprintln!(
-                    "[READBACK] Skipping tet {} with out-of-range vertices {:?}",
-                    i, t.v
-                );
                 continue;
             }
             idx_map.insert(i, tets.len()); // buffer_idx → output_idx
@@ -266,11 +257,14 @@ impl GpuState {
                 continue;
             }
             let t = tets_raw[i];
-            // Skip tets containing infinity vertex (same filter as phase 1)
-            if t.v[0] == inf_idx
-                || t.v[1] == inf_idx
-                || t.v[2] == inf_idx
-                || t.v[3] == inf_idx
+            // Same filters as phase 1
+            if t.v[0] == 0 && t.v[1] == 0 && t.v[2] == 0 && t.v[3] == 0 {
+                continue;
+            }
+            if t.v[0] > num_points + 4
+                || t.v[1] > num_points + 4
+                || t.v[2] > num_points + 4
+                || t.v[3] > num_points + 4
             {
                 continue;
             }

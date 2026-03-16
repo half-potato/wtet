@@ -316,7 +316,7 @@ impl GpuBuffers {
 
         let flip_count = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("flip_count"),
-            size: 4, // single atomic u32
+            size: 8, // two atomic u32s: [0] = next queue size, [1] = flip metadata count
             usage: storage_rw,
             mapped_at_creation: false,
         });
@@ -415,12 +415,17 @@ impl GpuBuffers {
             mapped_at_creation: false,
         });
 
+        // CUDA: _tetMsgVec.assign( TetMax, make_int2( -1, -1 ) );
+        // Must initialize to (-1, -1) so that msg.y < orgFlipNum (0) in first round
         let tet_msg_arr = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("tet_msg_arr"),
             size: (max_tets as u64) * 8, // vec2<i32> = 8 bytes
             usage: storage_rw,
-            mapped_at_creation: false,
+            mapped_at_creation: true,
         });
+        // Fill with 0xFF bytes: -1 in i32 = 0xFFFFFFFF
+        tet_msg_arr.slice(..).get_mapped_range_mut().fill(0xFF);
+        tet_msg_arr.unmap();
 
         let encoded_face_vi_arr = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("encoded_face_vi_arr"),
@@ -726,14 +731,14 @@ impl GpuBuffers {
         result
     }
 
-    /// Read flip_count (single u32) back to CPU.
+    /// Read flip counters back to CPU: (next_queue_size, metadata_flip_count).
     pub async fn read_flip_count(
         &self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
-    ) -> u32 {
-        let vals: Vec<u32> = self.read_buffer_as(device, queue, &self.flip_count, 1).await;
-        vals[0]
+    ) -> (u32, u32) {
+        let vals: Vec<u32> = self.read_buffer_as(device, queue, &self.flip_count, 2).await;
+        (vals[0], vals[1])
     }
 
     /// Read collection counter (from counters[0] after mark_rejected_flips collection).

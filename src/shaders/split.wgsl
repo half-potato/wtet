@@ -65,6 +65,13 @@ fn encode_opp(tet_idx: u32, face: u32) -> u32 {
     return (tet_idx << 5u) | (face & 3u);
 }
 
+// Encode internal adjacency (between split sibling tets).
+// Sets bit 2 = internal flag so check_delaunay_fast skips these faces.
+// CUDA: CommonTypes.h:277-279 setOppInternal
+fn encode_opp_internal(tet_idx: u32, face: u32) -> u32 {
+    return (tet_idx << 5u) | 4u | (face & 3u);
+}
+
 fn decode_opp_tet(packed: u32) -> u32 {
     return packed >> 5u;
 }
@@ -116,11 +123,6 @@ fn split_tetra(
     let tid = gid.x;  // Thread ID for debugging
     let idx = tid;
 
-    // DIAGNOSTIC: Write a sentinel value to prove shader executed
-    if idx == 0u {
-        tet_info[5] = 999u;
-    }
-
     let num_insertions = params.x;
     let inf_idx = params.y;
 
@@ -164,27 +166,11 @@ fn split_tetra(
     let t2 = new_slots.z;
     let t3 = new_slots.w;
 
-    // DIAGNOSTIC: Write allocated tet indices to tet_info[6-9]
-    if idx == 0u {
-        if t0 == 0u {
-            tet_info[6] = 0xAAAAu;  // t0 is 0
-        } else {
-            tet_info[6] = t0;
-        }
-        tet_info[7] = t1;
-        tet_info[9] = t3;
-    }
-
     breadcrumb(tid, CRUMB_AFTER_ALLOC);
     debug_slot(tid, 1u, new_slots);
 
     // NOTE: Removed allocation failure check - CUDA has no such validation
     // Pre-allocation should ensure enough slots are always available
-
-    // DIAGNOSTIC: Mark allocation success
-    if idx == 0u {
-        tet_info[8] = 0xBEEFu;
-    }
 
     breadcrumb(tid, CRUMB_BEFORE_WRITE);
 
@@ -221,27 +207,27 @@ fn split_tetra(
     //   face 3 -> external (original opposite face)
 
     // T0 (vi=0) adjacency: IntSplitFaceOpp[0] = {1, 0, 3, 0, 2, 0}
-    set_opp_at(t0, 0u, encode_opp(t1, 0u));   // face 0: T1's face 0
-    set_opp_at(t0, 1u, encode_opp(t3, 0u));   // face 1: T3's face 0
-    set_opp_at(t0, 2u, encode_opp(t2, 0u));   // face 2: T2's face 0
+    set_opp_at(t0, 0u, encode_opp_internal(t1, 0u));   // face 0: T1's face 0 (internal)
+    set_opp_at(t0, 1u, encode_opp_internal(t3, 0u));   // face 1: T3's face 0 (internal)
+    set_opp_at(t0, 2u, encode_opp_internal(t2, 0u));   // face 2: T2's face 0 (internal)
     // face 3: external - set below after detecting concurrent splits
 
     // T1 (vi=1) adjacency: IntSplitFaceOpp[1] = {0, 0, 2, 2, 3, 1}
-    set_opp_at(t1, 0u, encode_opp(t0, 0u));   // face 0: T0's face 0
-    set_opp_at(t1, 1u, encode_opp(t2, 2u));   // face 1: T2's face 2
-    set_opp_at(t1, 2u, encode_opp(t3, 1u));   // face 2: T3's face 1
+    set_opp_at(t1, 0u, encode_opp_internal(t0, 0u));   // face 0: T0's face 0 (internal)
+    set_opp_at(t1, 1u, encode_opp_internal(t2, 2u));   // face 1: T2's face 2 (internal)
+    set_opp_at(t1, 2u, encode_opp_internal(t3, 1u));   // face 2: T3's face 1 (internal)
     // face 3: external - set below after detecting concurrent splits
 
     // T2 (vi=2) adjacency: IntSplitFaceOpp[2] = {0, 2, 3, 2, 1, 1}
-    set_opp_at(t2, 0u, encode_opp(t0, 2u));   // face 0: T0's face 2
-    set_opp_at(t2, 1u, encode_opp(t3, 2u));   // face 1: T3's face 2
-    set_opp_at(t2, 2u, encode_opp(t1, 1u));   // face 2: T1's face 1
+    set_opp_at(t2, 0u, encode_opp_internal(t0, 2u));   // face 0: T0's face 2 (internal)
+    set_opp_at(t2, 1u, encode_opp_internal(t3, 2u));   // face 1: T3's face 2 (internal)
+    set_opp_at(t2, 2u, encode_opp_internal(t1, 1u));   // face 2: T1's face 1 (internal)
     // face 3: external - set below after detecting concurrent splits
 
     // T3 (vi=3) adjacency: IntSplitFaceOpp[3] = {0, 1, 1, 2, 2, 1}
-    set_opp_at(t3, 0u, encode_opp(t0, 1u));   // face 0: T0's face 1
-    set_opp_at(t3, 1u, encode_opp(t1, 2u));   // face 1: T1's face 2
-    set_opp_at(t3, 2u, encode_opp(t2, 1u));   // face 2: T2's face 1
+    set_opp_at(t3, 0u, encode_opp_internal(t0, 1u));   // face 0: T0's face 1 (internal)
+    set_opp_at(t3, 1u, encode_opp_internal(t1, 2u));   // face 1: T1's face 2 (internal)
+    set_opp_at(t3, 2u, encode_opp_internal(t2, 1u));   // face 2: T2's face 1 (internal)
     // face 3: external - set below after detecting concurrent splits
 
     // ═══════════════════════════════════════════════════════════════════════════
@@ -279,7 +265,11 @@ fn split_tetra(
 
             if nei_split_idx != INVALID {
                 // Neighbor has split - use free_arr to find correct new tet
-                let nei_split_vert = insert_list[nei_split_idx].y;  // vertex being inserted
+                // CRITICAL: insert_list[].y is POSITION in uninserted array, NOT vertex ID.
+                // Must look up actual vertex via uninserted[] for free list formula.
+                // CUDA ref (KerDivision.cu:155): neiSplitVert = vertArr[neiSplitIdx]
+                let nei_split_pos = insert_list[nei_split_idx].y;
+                let nei_split_vert = uninserted[nei_split_pos];
                 let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
 
                 nei_tet = free_arr[nei_free_idx - nei_face];

@@ -44,13 +44,12 @@ fn get_tet_vi(input: i32, old_vi: u32) -> u32 {
     return idx_vi & 0x3u;
 }
 
-fn load_flip_item(flip_idx: u32) -> array<i32, 8> {
-    let item0 = flip_vec[flip_idx * 2u];
+// Load tet indices from FlipItem (CUDA: loadFlipTetIdx)
+// FlipItem layout: [_v[0], _v[1], _v[2], _v[3], _v[4], _t[0], _t[1], _t[2]]
+// Second vec4 = (_v[4], _t[0], _t[1], _t[2]) → tet indices are .yzw
+fn load_flip_tet_idx(flip_idx: u32) -> vec3<i32> {
     let item1 = flip_vec[flip_idx * 2u + 1u];
-    return array<i32, 8>(
-        item0.x, item0.y, item0.z, item0.w,
-        item1.x, item1.y, item1.z, item1.w
-    );
+    return vec3<i32>(item1.y, item1.z, item1.w);
 }
 
 fn make_positive(val: i32) -> u32 {
@@ -70,15 +69,16 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         return;
     }
 
-    // Load flip item (8 ints total)
-    let flip_item = load_flip_item(flip_idx);
-    let is_flip23 = flip_item[2] >= 0;
+    // Load tet indices (CUDA: FlipItemTetIdx)
+    // tet_idx.x = _t[0] = botTetIdx, .y = _t[1] = topTetIdx, .z = _t[2] = sideTetIdx
+    let tet_idx = load_flip_tet_idx(flip_idx);
+    let is_flip23 = tet_idx.z >= 0;
 
     let encoded_face_vi = encoded_face_vi_arr[flip_idx];
     var ext_opp: array<u32, 6>;
 
-    // Load external opposites from tet 0
-    let base0 = u32(flip_item[0]) * 4u;
+    // Load external opposites from tet 0 (botTetIdx)
+    let base0 = u32(tet_idx.x) * 4u;
     if is_flip23 {
         ext_opp[0] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 10u) & 3u)]);
         ext_opp[2] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 6u) & 3u)]);
@@ -88,8 +88,8 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         ext_opp[1] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 8u) & 3u)]);
     }
 
-    // Load external opposites from tet 1
-    let base1 = u32(flip_item[1]) * 4u;
+    // Load external opposites from tet 1 (topTetIdx)
+    let base1 = u32(tet_idx.y) * 4u;
     if is_flip23 {
         ext_opp[1] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 8u) & 3u)]);
         ext_opp[3] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]);
@@ -98,13 +98,13 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         ext_opp[2] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 6u) & 3u)]);
         ext_opp[3] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]);
 
-        // Load from tet 2 for 3-2 flip
-        let base2 = make_positive(flip_item[2]) * 4u;
+        // Load from tet 2 (sideTetIdx) for 3-2 flip
+        let base2 = make_positive(tet_idx.z) * 4u;
         ext_opp[4] = atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 2u) & 3u)]);
         ext_opp[5] = atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 0u) & 3u)]);
     }
 
-    // // Update with neighbors
+    // Update with neighbors (CUDA: KerDivision.cu:611-651)
     for (var i = 0u; i < 6u; i++) {
         var new_tet_idx: u32;
         var vi: u32;
@@ -115,17 +115,26 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
 
         let msg = tet_msg_arr[opp_idx];
 
-        if u32(msg.y) < org_flip_num {
+        if msg.y < i32(org_flip_num) {
             // Neighbor not flipped - set my neighbor's opp
             if is_flip23 {
-                // flip_item[i / 2u] - avoid dynamic indexing
+                // CUDA: newTetIdx = flipItem._t[i / 2]
                 let idx = i / 2u;
-                new_tet_idx = select(select(u32(flip_item[0]), u32(flip_item[1]), idx == 1u), u32(flip_item[2]), idx == 2u);
+                if idx == 0u { new_tet_idx = u32(tet_idx.x); }
+                else if idx == 1u { new_tet_idx = u32(tet_idx.y); }
+                else { new_tet_idx = u32(tet_idx.z); }
                 vi = select(0u, 3u, (i & 1u) != 0u);
             } else {
-                // flip_item[1u - (i & 1u)] - avoid dynamic indexing
-                new_tet_idx = select(u32(flip_item[1]), u32(flip_item[0]), (i & 1u) != 0u);
-                vi = FLIP32_NEW_FACE_VI[i / 2u][i & 1u];
+                // CUDA: newTetIdx = flipItem._t[1 - (i & 1)]
+                if (i & 1u) != 0u { new_tet_idx = u32(tet_idx.x); }
+                else { new_tet_idx = u32(tet_idx.y); }
+                // Flip32NewFaceVi[i/2][i&1] - explicit branches to avoid variable indexing SIGSEGV
+                if i == 0u { vi = 2u; }       // [0][0] = 2
+                else if i == 1u { vi = 1u; }  // [0][1] = 1
+                else if i == 2u { vi = 1u; }  // [1][0] = 1
+                else if i == 3u { vi = 2u; }  // [1][1] = 2
+                else if i == 4u { vi = 0u; }  // [2][0] = 0
+                else { vi = 0u; }             // [2][1] = 0
             }
 
             atomicStore(&opp_arr[opp_idx * 4u + opp_vi], make_opp_val(new_tet_idx, vi));
@@ -135,8 +144,11 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
             let new_loc_opp_idx = get_tet_idx(msg.x, opp_vi);
 
             if new_loc_opp_idx != 3u {
-                let opp_flip_item = load_flip_item(opp_flip_idx);
-                opp_idx = u32(opp_flip_item[new_loc_opp_idx]);
+                // CUDA: oppIdx = flipVec[oppFlipIdx]._t[newLocOppIdx]
+                let opp_tet = load_flip_tet_idx(opp_flip_idx);
+                if new_loc_opp_idx == 0u { opp_idx = u32(opp_tet.x); }
+                else if new_loc_opp_idx == 1u { opp_idx = u32(opp_tet.y); }
+                else { opp_idx = u32(opp_tet.z); }
             }
 
             opp_vi = get_tet_vi(msg.x, opp_vi);
@@ -144,42 +156,42 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
         }
     }
 
-    // Write updated opp arrays
+    // Write updated opp arrays (CUDA: KerDivision.cu:653-691)
     if is_flip23 {
         // Tet 0
-        let out0 = u32(flip_item[0]) * 4u;
+        let out0 = u32(tet_idx.x) * 4u;
         atomicStore(&opp_arr[out0 + 0u], ext_opp[0]);
-        atomicStore(&opp_arr[out0 + 1u], make_opp_val_internal(u32(flip_item[1]), 2u));
-        atomicStore(&opp_arr[out0 + 2u], make_opp_val_internal(u32(flip_item[2]), 1u));
+        atomicStore(&opp_arr[out0 + 1u], make_opp_val_internal(u32(tet_idx.y), 2u));
+        atomicStore(&opp_arr[out0 + 2u], make_opp_val_internal(u32(tet_idx.z), 1u));
         atomicStore(&opp_arr[out0 + 3u], ext_opp[1]);
 
         // Tet 1
-        let out1 = u32(flip_item[1]) * 4u;
+        let out1 = u32(tet_idx.y) * 4u;
         atomicStore(&opp_arr[out1 + 0u], ext_opp[2]);
-        atomicStore(&opp_arr[out1 + 1u], make_opp_val_internal(u32(flip_item[2]), 2u));
-        atomicStore(&opp_arr[out1 + 2u], make_opp_val_internal(u32(flip_item[0]), 1u));
+        atomicStore(&opp_arr[out1 + 1u], make_opp_val_internal(u32(tet_idx.z), 2u));
+        atomicStore(&opp_arr[out1 + 2u], make_opp_val_internal(u32(tet_idx.x), 1u));
         atomicStore(&opp_arr[out1 + 3u], ext_opp[3]);
 
         // Tet 2
-        let out2 = u32(flip_item[2]) * 4u;
+        let out2 = u32(tet_idx.z) * 4u;
         atomicStore(&opp_arr[out2 + 0u], ext_opp[4]);
-        atomicStore(&opp_arr[out2 + 1u], make_opp_val_internal(u32(flip_item[0]), 2u));
-        atomicStore(&opp_arr[out2 + 2u], make_opp_val_internal(u32(flip_item[1]), 1u));
+        atomicStore(&opp_arr[out2 + 1u], make_opp_val_internal(u32(tet_idx.x), 2u));
+        atomicStore(&opp_arr[out2 + 2u], make_opp_val_internal(u32(tet_idx.y), 1u));
         atomicStore(&opp_arr[out2 + 3u], ext_opp[5]);
     } else {
         // 3-2 flip
         // Tet 0
-        let out0 = u32(flip_item[0]) * 4u;
+        let out0 = u32(tet_idx.x) * 4u;
         atomicStore(&opp_arr[out0 + 0u], ext_opp[5]);
         atomicStore(&opp_arr[out0 + 1u], ext_opp[1]);
         atomicStore(&opp_arr[out0 + 2u], ext_opp[3]);
-        atomicStore(&opp_arr[out0 + 3u], make_opp_val_internal(u32(flip_item[1]), 3u));
+        atomicStore(&opp_arr[out0 + 3u], make_opp_val_internal(u32(tet_idx.y), 3u));
 
         // Tet 1
-        let out1 = u32(flip_item[1]) * 4u;
+        let out1 = u32(tet_idx.y) * 4u;
         atomicStore(&opp_arr[out1 + 0u], ext_opp[4]);
         atomicStore(&opp_arr[out1 + 1u], ext_opp[2]);
         atomicStore(&opp_arr[out1 + 2u], ext_opp[0]);
-        atomicStore(&opp_arr[out1 + 3u], make_opp_val_internal(u32(flip_item[0]), 3u));
+        atomicStore(&opp_arr[out1 + 3u], make_opp_val_internal(u32(tet_idx.x), 3u));
     }
 }

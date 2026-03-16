@@ -10,7 +10,7 @@
 
 use crate::cpu::facet::{decode, encode, Facet, TriOpp, TriStatus};
 use crate::cpu::star::Star;
-use crate::types::{decode_opp, DelaunayResult};
+use crate::types::{decode_opp, DelaunayResult, INVALID};
 
 /// Lookup tables from CommonTypes.h (lines 125-137)
 ///
@@ -44,10 +44,23 @@ pub fn fix_with_star_splaying(points: &[[f32; 3]], result: &mut DelaunayResult) 
     eprintln!("[SPLAY] Input: {} points, {} tets, {} failed vertices",
               points.len(), result.tets.len(), result.failed_verts.len());
 
-    // Force-insert failed vertices so star splaying can fix them
-    eprintln!("\n[SPLAY] PHASE 0: Force-Insert Failed Vertices");
-    crate::cpu::force_insert::force_insert_failed_vertices(result);
-    eprintln!("[SPLAY] After force-insert: {} tets", result.tets.len());
+    // Only force-insert vertices that are NOT already in the triangulation.
+    // The gather shader reports insphere-violating vertices that ARE already inserted —
+    // those just need star splaying, not re-insertion.
+    eprintln!("\n[SPLAY] PHASE 0: Force-Insert Missing Vertices");
+    let missing: Vec<u32> = result.failed_verts.iter()
+        .filter(|&&v| !result.tets.iter().any(|tet| tet.contains(&v)))
+        .copied()
+        .collect();
+    if !missing.is_empty() {
+        eprintln!("[SPLAY] Force-inserting {} missing vertices: {:?}", missing.len(), missing);
+        for &vert in &missing {
+            crate::cpu::force_insert::force_insert_vertex(vert, result);
+        }
+    } else {
+        eprintln!("[SPLAY] All {} failed vertices already in triangulation, skipping force-insert", result.failed_verts.len());
+    }
+    eprintln!("[SPLAY] After phase 0: {} tets", result.tets.len());
 
     let mut ctx = SplayingContext::new(points, result);
 
@@ -183,8 +196,20 @@ impl SplayingContext {
 
             for vi in 0..3 {
                 let opp_tet_packed = star.tri_opp_vec[tri_idx].t[vi];
+                if opp_tet_packed == INVALID {
+                    continue; // Boundary face
+                }
                 let (opp_tet_idx, opp_tet_vi) = decode_opp(opp_tet_packed);
                 let opp_tet_idx = opp_tet_idx as usize;
+
+                // Mark external faces as INVALID (neighbor tet not in this star).
+                // These are boundary faces of the star — flipping must not cross them.
+                if opp_tet_idx >= self.tet_visit.len()
+                    || self.tet_visit[opp_tet_idx] != self.visit_id
+                {
+                    star.tri_opp_vec[tri_idx].t[vi] = INVALID;
+                    continue;
+                }
 
                 // Decode tet → triangle mapping
                 let (opp_tri_idx, opp_bot_vi) = decode(self.tet_tri_map[opp_tet_idx]);

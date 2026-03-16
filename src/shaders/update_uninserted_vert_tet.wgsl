@@ -1,16 +1,20 @@
 // Kernel: Update vert_tet for all uninserted vertices to point to an alive tet
 //
-// After splits, some vertices may still point to dead tets. This kernel ensures
-// all uninserted vertices point to a valid alive tet so point location can find them.
+// After flips, some vertices may point to dead tets (destroyed by 3-2 flips).
+// This kernel walks adjacency from dead tets to find alive neighbors.
 //
-// Dispatch: ceil(num_uninserted / 64)
+// Strategy:
+// 1. If old_tet is alive → keep it (fast path, most common case)
+// 2. If dead, check its 4 neighbors via tet_opp → use first alive neighbor
+// 3. If no alive neighbor, scan tet_info for any alive tet (fallback)
+//
+// Dispatch: ceil(num_uninserted / 256)
 
 @group(0) @binding(0) var<storage, read> tet_info: array<u32>;
 @group(0) @binding(1) var<storage, read> uninserted: array<u32>;
 @group(0) @binding(2) var<storage, read_write> vert_tet: array<u32>;
 @group(0) @binding(3) var<uniform> params: vec4<u32>; // x = num_uninserted, y = max_tets
-// NOTE: Removed update_debug to stay under 10 storage buffer limit
-// @group(0) @binding(4) var<storage, read_write> update_debug: array<vec4<u32>>; // Debug output per thread
+@group(0) @binding(4) var<storage, read> tet_opp: array<u32>;
 
 const TET_ALIVE: u32 = 1u;
 
@@ -20,34 +24,55 @@ fn update_uninserted_vert_tet(
 ) {
     let idx = gid.x;
     let num_uninserted = params.x;
+    let max_tets = params.y;
 
     if idx >= num_uninserted {
         return;
     }
 
-    let vert_idx = uninserted[idx];
     // CRITICAL: vert_tet is position-indexed, NOT vertex-indexed!
     // Use idx (position in uninserted array), not vert_idx (vertex ID)
     let old_tet = vert_tet[idx];
 
-    // Debug: record start state (DISABLED)
-    // update_debug[idx * 4u + 0u] = vec4<u32>(idx, vert_idx, old_tet, num_uninserted);
+    // Fast path: old_tet is still alive → nothing to repair
+    if old_tet < max_tets && (tet_info[old_tet] & TET_ALIVE) != 0u {
+        return;
+    }
 
-    // Scan for first alive tet (limit scan to first 100 tets for performance)
-    // Most alive tets will be in low indices
-    var found_tet = 0u;
-    for (var tet_idx = 1u; tet_idx < 100u; tet_idx++) {
-        if (tet_info[tet_idx] & TET_ALIVE) != 0u {
-            found_tet = tet_idx;
-            vert_tet[idx] = tet_idx;
-            break;
+    // Old tet is dead. Walk adjacency to find alive neighbor.
+    // tet_opp uses 5-bit encoding: tet_idx = packed >> 5u
+    if old_tet < max_tets {
+        for (var face = 0u; face < 4u; face++) {
+            let packed = tet_opp[old_tet * 4u + face];
+            let nei_tet = packed >> 5u;
+            if nei_tet < max_tets && (tet_info[nei_tet] & TET_ALIVE) != 0u {
+                vert_tet[idx] = nei_tet;
+                return;
+            }
+        }
+
+        // Second ring: check neighbors of neighbors
+        for (var face = 0u; face < 4u; face++) {
+            let packed = tet_opp[old_tet * 4u + face];
+            let nei_tet = packed >> 5u;
+            if nei_tet < max_tets {
+                for (var face2 = 0u; face2 < 4u; face2++) {
+                    let packed2 = tet_opp[nei_tet * 4u + face2];
+                    let nei2_tet = packed2 >> 5u;
+                    if nei2_tet < max_tets && (tet_info[nei2_tet] & TET_ALIVE) != 0u {
+                        vert_tet[idx] = nei2_tet;
+                        return;
+                    }
+                }
+            }
         }
     }
 
-    // Debug: record result (DISABLED)
-    // let new_tet = vert_tet[idx];
-    // let old_status = tet_info[old_tet];
-    // update_debug[idx * 4u + 1u] = vec4<u32>(found_tet, new_tet, old_status, 0u);
-    // update_debug[idx * 4u + 2u] = vec4<u32>(tet_info[1], tet_info[61], tet_info[62], tet_info[63]);
-    // update_debug[idx * 4u + 3u] = vec4<u32>(tet_info[64], 0u, 0u, 0u);
+    // Fallback: scan for ANY alive tet
+    for (var t = 0u; t < max_tets; t++) {
+        if (tet_info[t] & TET_ALIVE) != 0u {
+            vert_tet[idx] = t;
+            return;
+        }
+    }
 }

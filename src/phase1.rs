@@ -9,7 +9,7 @@
 //! 6. Remove inserted points from uninserted list
 //! 7. Repeat until all points inserted or budget exhausted
 
-use crate::gpu::{GpuState, FlipCompactMode};
+use crate::gpu::GpuState;
 use crate::types::GDelConfig;
 use std::time::Instant;
 
@@ -191,303 +191,188 @@ pub async fn run(
 
         // 6. Flip checking (optional, iterative) - TWO-PHASE FLIPPING
         if config.enable_flipping {
-            // CUDA two-phase flipping:
-            // Phase 1: doFlippingLoop(Fast) - f32 predicates for 99%+ of cases
-            // Phase 2: markSpecialTets() → doFlippingLoop(Exact) - DD + SoS for degenerate cases
+            // Collect ALL alive tets for flipping. CUDA's check_delaunay runs over
+            // all active tets, not just changed ones.
+            let tet_num_for_collect = state.current_tet_num;
+            let mut flip_queue_size = state
+                .dispatch_collect_active_tets(device, queue, tet_num_for_collect)
+                .await;
+            eprintln!("[FLIP] Collected {} active tets for flipping", flip_queue_size);
 
-            // Initialize active tet vector with newly split tets (4 per insertion)
-            // TODO: Populate act_tet_vec from split operation
-            let mut flip_queue_size = num_inserted * 4;
-
-            // Manage vote offset to separate insertion and flip voting
-            // CUDA Reference: GpuDelaunay.cu:1121-1128
-            let tet_num = state.current_tet_num;
-            if state.vote_offset < tet_num {
-                // Not enough space - reset tet_vote buffer and offset
-                // In CUDA this does: _tetVoteVec.assign(_tetVoteVec.capacity(), INT_MAX)
-                // For WGPU, we rely on reset_votes being called each iteration
-                state.vote_offset = state.max_tets;
-            }
-            state.vote_offset -= tet_num;
-            let vote_offset = state.vote_offset;
-
-            let use_alternate = false; // TODO: Implement double buffering if needed
+            let mut use_alternate = false;
 
             // Track flip batch boundaries for relocateAll
             let mut org_flip_num: Vec<u32> = Vec::new();
             let mut total_flips = 0u32;
 
-            // ========== PHASE 1: FAST FLIPPING (f32 predicates) ==========
+            // ========== PHASE 1: FAST FLIPPING (self-contained flip shader) ==========
+            // The flip shader (flip_check) is self-contained: it does its own insphere/orient3d
+            // checks, CAS locking, allocation, adjacency updates, and enqueues new tets.
+            // We bypass check_delaunay/mark_rejected/allocate/update_opp — those were designed
+            // for CUDA's kerFlip which uses pre-computed flip info, but our flip.wgsl doesn't.
             state.cpu_profiler.begin("5_flip_fast");
             eprintln!("[FLIP] Starting fast flipping phase with {} initial tets", flip_queue_size);
+
+            // Copy act_tet_vec → flip_queue to seed the flip shader's input
+            // (act_tet_vec is i32, flip_queue is u32 — bit-identical for positive values)
+            {
+                let mut encoder = device.create_command_encoder(&Default::default());
+                encoder.copy_buffer_to_buffer(
+                    &state.buffers.act_tet_vec, 0,
+                    &state.buffers.flip_queue, 0,
+                    (flip_queue_size as u64) * 4,
+                );
+                queue.submit(Some(encoder.finish()));
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+            }
 
             for flip_iter in 0..config.max_flip_iterations {
                 if flip_queue_size == 0 {
                     break;
                 }
 
-                // Reset ALL counters used by flip collection + compaction
-                // counters[0] = collection count (used by CollectCompact via atomicAdd in mark_rejected_flips)
-                // counters[1] = compact count (used by MarkCompact)
-                // counters[2] = inserted count
-                // CRITICAL: counters[0] MUST be reset here, otherwise stale values from
-                // previous compaction bleed into the flip count, causing overflow and GPU hang.
-                queue.write_buffer(
-                    &state.buffers.counters,
-                    0,
-                    bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
-                );
+                // Reset flip_count[0] (next queue size) and flip_count[1] (metadata flip count)
+                state.reset_flip_count(queue);
 
-                // BATCHED: Check → Validate → Compact
-                // Eliminates 2 submit/poll cycles per flip iteration
+                // Three-phase flip: vote → check+execute → update_opp
                 let mut encoder = device.create_command_encoder(&Default::default());
+                let inf_idx = state.num_points + 4;
 
-                // STEP 1: VOTE - Check Delaunay violations and vote for flips
-                state.dispatch_check_delaunay_fast(&mut encoder, queue, flip_queue_size, vote_offset);
+                // Pass 1: Reset tet_vote to INT_MAX
+                state.dispatch_reset_flip_votes(&mut encoder, queue);
+                // Pass 2: Vote (atomicMin on all involved tets)
+                state.dispatch_flip_vote(&mut encoder, queue, flip_queue_size, inf_idx, use_alternate, false, total_flips);
+                // Pass 3: Execute flips + write metadata (NO adjacency writes)
+                state.dispatch_flip(&mut encoder, queue, flip_queue_size, inf_idx, use_alternate, total_flips);
 
-                // STEP 2: VALIDATE - Mark rejected flips
-                state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
+                queue.submit(Some(encoder.finish()));
+                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-                // STEP 3: COMPACT (ADAPTIVE) - Remove rejected flips
-                let compact_mode = FlipCompactMode::select(flip_queue_size);
+                // Read counters: (next_queue_size, metadata_flip_count)
+                let (new_count, flip_num) = state.buffers.read_flip_count(device, queue).await;
 
-                let flip_count = match compact_mode {
-                    FlipCompactMode::CollectCompact => {
-                        // Collection already done in mark_rejected_flips with atomic counters
-                        // Just read the counter[0] result
-                        queue.submit(Some(encoder.finish()));
-                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-                        state.buffers.read_collection_count(device, queue).await  // Read counters[0]
-                    }
-                    FlipCompactMode::MarkCompact => {
-                        // Run traditional 2-pass compaction
-                        state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
-                        queue.submit(Some(encoder.finish()));
-                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-                        state.buffers.read_compact_count(device, queue).await  // Read counters[1]
-                    }
-                };
+                // Pass 4: update_opp — fix all adjacency using flip metadata
+                if flip_num > 0 {
+                    let mut encoder = device.create_command_encoder(&Default::default());
+                    state.dispatch_update_opp(&mut encoder, queue, total_flips, flip_num);
+                    queue.submit(Some(encoder.finish()));
+                    device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                }
 
                 eprintln!(
-                    "[FLIP] Iteration {}: mode={:?}, input={}, output={}",
-                    flip_iter + 1,
-                    compact_mode,
-                    flip_queue_size,
-                    flip_count
+                    "[FLIP] Iteration {}: input={}, flipped_to={}, flips={}",
+                    flip_iter + 1, flip_queue_size, new_count, flip_num
                 );
 
-                if flip_count == 0 {
+                // Track org_flip_num for tet_msg_arr staleness
+                org_flip_num.push(total_flips);
+                total_flips += flip_num;
+
+                if new_count == 0 {
                     break;
                 }
 
-                // BATCHED: Allocate → Flip → Update
-                // Eliminates 2 submit/poll cycles per flip iteration
-                let mut encoder = device.create_command_encoder(&Default::default());
-
-                // STEP 4: ALLOCATE - Reserve slots for 2-3 flips
-                let inf_idx = state.max_tets; // Infinity vertex at end
-                state.dispatch_allocate_flip23_slot(&mut encoder, queue, flip_count, inf_idx, state.max_tets);
-
-                // STEP 5: FLIP - Perform the flips
-                let inf_idx = state.num_points;  // Infinity point index
-                state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
-
-                // STEP 6: UPDATE - Fix adjacency
-                state.dispatch_update_opp(&mut encoder, queue, 0, flip_count);
-
-                queue.submit(Some(encoder.finish()));
-                device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-                // Track this batch boundary for relocateAll
-                org_flip_num.push(total_flips);
-                total_flips += flip_count;
-
-                // Check for flip array overflow
-                if total_flips > state.max_flips {
-                    eprintln!("[WARNING] Flip array overflow: {} flips > {} capacity",
-                             total_flips, state.max_flips);
-                    eprintln!("[WARNING] Dataset requires more flips than allocated");
-                    eprintln!("[WARNING] Consider increasing allocation or chunking input");
-                    break;  // Exit flipping, will fall back to star splaying
-                }
-
-                // Read back how many tets were enqueued for the next round
-                let new_count = state.buffers.read_flip_count(device, queue).await;
+                // Swap flip_queue ↔ flip_queue_next for next iteration
+                use_alternate = !use_alternate;
                 flip_queue_size = new_count;
+
+                // Safety check for flip array overflow
+                if total_flips > state.max_flips {
+                    eprintln!("[WARNING] Flip array overflow: {} > {} capacity",
+                             total_flips, state.max_flips);
+                    break;
+                }
             }
 
-            eprintln!("[FLIP] Fast phase complete: {} total flips", total_flips);
+            eprintln!("[FLIP] Fast phase complete: {} total flipped tets", total_flips);
             state.cpu_profiler.end("5_flip_fast");
 
-            // ========== PHASE 2: EXACT FLIPPING (DD + SoS for degenerate cases) ==========
-            // Mark tets that had uncertain predicates (OPP_SPECIAL flag set by fast phase)
-            state.cpu_profiler.begin("6_mark_special");
-            eprintln!("[FLIP] Checking for special tets requiring exact predicates...");
-            let mut encoder = device.create_command_encoder(&Default::default());
-            state.dispatch_mark_special_tets(&mut encoder, queue, tet_num);
-            queue.submit(Some(encoder.finish()));
-            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-            state.cpu_profiler.end("6_mark_special");
+            // ========== PHASE 2: Re-check ALL alive tets (multiple rounds) ==========
+            // After fast phase converges, some violations may exist between tets
+            // that were not in the queue (created in earlier iterations). CUDA's
+            // check_delaunay examines all active tets, not just changed ones.
+            // We loop: collect ALL alive → flip → repeat until no new flips.
+            {
+                state.cpu_profiler.begin("6_reflip_all");
+                let tet_num = state.current_tet_num;
 
-            // Count how many special tets need exact processing
-            let special_tet_count = state.buffers.read_compact_count(device, queue).await;
-            eprintln!("[FLIP] Special tet count: {}", special_tet_count);
+                for global_round in 0..5u32 {
+                    let all_alive_count = state
+                        .dispatch_collect_all_alive_tets(device, queue, tet_num)
+                        .await;
 
-            if special_tet_count == 0 {
-                eprintln!("[FLIP] No special tets - fast phase was sufficient");
-            } else {
-                state.cpu_profiler.begin("7_flip_exact");
-                eprintln!("[FLIP] Found {} special tets requiring exact predicates", special_tet_count);
+                    if all_alive_count == 0 { break; }
 
-                flip_queue_size = special_tet_count;
-
-                for flip_iter in 0..config.max_flip_iterations {
-                    if flip_queue_size == 0 {
-                        break;
-                    }
-
-                    // Reset ALL counters used by flip collection + compaction
-                    // (same fix as fast flip loop - counters[0] must be zeroed)
-                    queue.write_buffer(
-                        &state.buffers.counters,
-                        0,
-                        bytemuck::cast_slice(&[0u32, 0u32, 0u32]),
-                    );
-
-                    // BATCHED: Check → Validate → Compact
-                    // Eliminates 2 submit/poll cycles per flip iteration
                     let mut encoder = device.create_command_encoder(&Default::default());
-
-                    // STEP 1: VOTE - Check Delaunay violations with exact predicates
-                    state.dispatch_check_delaunay_exact(&mut encoder, queue, flip_queue_size, vote_offset);
-
-                    // STEP 2: VALIDATE - Mark rejected flips
-                    state.dispatch_mark_rejected_flips(&mut encoder, queue, flip_queue_size, vote_offset as i32, true);
-
-                    // STEP 3: COMPACT (ADAPTIVE) - Remove rejected flips
-                    let compact_mode = FlipCompactMode::select(flip_queue_size);
-
-                    let flip_count = match compact_mode {
-                        FlipCompactMode::CollectCompact => {
-                            // Collection already done in mark_rejected_flips with atomic counters
-                            // Just read the counter[0] result
-                            queue.submit(Some(encoder.finish()));
-                            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-                            state.buffers.read_collection_count(device, queue).await  // Read counters[0]
-                        }
-                        FlipCompactMode::MarkCompact => {
-                            // Run traditional 2-pass compaction
-                            state.dispatch_compact_if_negative(&mut encoder, queue, flip_queue_size);
-                            queue.submit(Some(encoder.finish()));
-                            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-
-                            state.buffers.read_compact_count(device, queue).await  // Read counters[1]
-                        }
-                    };
-
-                    eprintln!(
-                        "[FLIP-EXACT] Iteration {}: mode={:?}, input={}, output={}",
-                        flip_iter + 1,
-                        compact_mode,
-                        flip_queue_size,
-                        flip_count
+                    encoder.copy_buffer_to_buffer(
+                        &state.buffers.act_tet_vec, 0,
+                        if use_alternate { &state.buffers.flip_queue_next } else { &state.buffers.flip_queue }, 0,
+                        (all_alive_count as u64) * 4,
                     );
-
-                    if flip_count == 0 {
-                        break;
-                    }
-
-                    // BATCHED: Allocate → Flip → Update
-                    // Eliminates 2 submit/poll cycles per flip iteration
-                    let mut encoder = device.create_command_encoder(&Default::default());
-
-                    // STEP 4: ALLOCATE - Reserve slots for 2-3 flips
-                    let inf_idx = state.max_tets;
-                    state.dispatch_allocate_flip23_slot(&mut encoder, queue, flip_count, inf_idx, state.max_tets);
-
-                    // STEP 5: FLIP - Perform the flips
-                    let inf_idx = state.num_points;  // Infinity point index
-                    state.dispatch_flip(&mut encoder, queue, flip_count, inf_idx, use_alternate);
-
-                    // STEP 6: UPDATE - Fix adjacency
-                    state.dispatch_update_opp(&mut encoder, queue, 0, flip_count);
-
                     queue.submit(Some(encoder.finish()));
                     device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
 
-                    // Track this batch boundary for relocateAll
-                    org_flip_num.push(total_flips);
-                    total_flips += flip_count;
+                    let mut round_flips = 0u32;
+                    flip_queue_size = all_alive_count;
+                    for flip_iter in 0..config.max_flip_iterations {
+                        if flip_queue_size == 0 { break; }
 
-                    // Check for flip array overflow
-                    if total_flips > state.max_flips {
-                        eprintln!("[WARNING] Flip array overflow: {} flips > {} capacity",
-                                 total_flips, state.max_flips);
-                        eprintln!("[WARNING] Dataset requires more flips than allocated");
-                        eprintln!("[WARNING] Consider increasing allocation or chunking input");
-                        break;  // Exit flipping, will fall back to star splaying
+                        state.reset_flip_count(queue);
+                        let mut encoder = device.create_command_encoder(&Default::default());
+                        let inf_idx = state.num_points + 4;
+
+                        // Three-phase flip with exact predicates
+                        state.dispatch_reset_flip_votes(&mut encoder, queue);
+                        state.dispatch_flip_vote(&mut encoder, queue, flip_queue_size, inf_idx, use_alternate, true, total_flips);
+                        state.dispatch_flip_exact(&mut encoder, queue, flip_queue_size, inf_idx, use_alternate, total_flips);
+
+                        queue.submit(Some(encoder.finish()));
+                        device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+
+                        let (new_count, flip_num) = state.buffers.read_flip_count(device, queue).await;
+
+                        // update_opp — fix adjacency using flip metadata
+                        if flip_num > 0 {
+                            let mut encoder = device.create_command_encoder(&Default::default());
+                            state.dispatch_update_opp(&mut encoder, queue, total_flips, flip_num);
+                            queue.submit(Some(encoder.finish()));
+                            device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
+                        }
+
+                        eprintln!(
+                            "[FLIP-ALL R{}] Iteration {}: input={}, flipped_to={}, flips={}",
+                            global_round + 1, flip_iter + 1, flip_queue_size, new_count, flip_num
+                        );
+
+                        round_flips += flip_num;
+                        total_flips += flip_num;
+
+                        if new_count == 0 { break; }
+                        use_alternate = !use_alternate;
+                        flip_queue_size = new_count;
+
+                        if total_flips > state.max_flips { break; }
                     }
 
-                    // Read back how many tets were enqueued for the next round
-                    let new_count = state.buffers.read_flip_count(device, queue).await;
-                    flip_queue_size = new_count;
+                    if round_flips == 0 { break; }
+                    eprintln!("[FLIP-ALL R{}] Found {} new flips, re-collecting...", global_round + 1, round_flips);
                 }
 
-                eprintln!("[FLIP] Exact phase complete: {} additional flips, {} total", total_flips - org_flip_num.last().copied().unwrap_or(0), total_flips);
-                state.cpu_profiler.end("7_flip_exact");
+                eprintln!("[FLIP] All-tets phase complete: {} total flipped tets", total_flips);
+                state.cpu_profiler.end("6_reflip_all");
             }
 
-            // CRITICAL: Relocate points after flipping (updates vert_tet for points whose tets flipped)
-            // Port of GpuDel::relocateAll() from GpuDelaunay.cu:1250-1311
+            // After flipping, some vert_tet entries may point to dead tets
+            // (destroyed by 3-2 flips). Repair them by walking adjacency.
+            // This replaces the full relocateAll which requires flip trace arrays
+            // that the self-contained flip shader doesn't populate.
             if total_flips > 0 {
-                state.cpu_profiler.begin("8_relocate");
-                // Initialize tet_to_flip buffer with -1 (maps tet index → flip chain head)
-                // OPTIMIZATION: Use GPU shader instead of CPU vec allocation + transfer
-                // Old: vec![-1i32; current_tets] + write_buffer = 20MB+ CPU→GPU transfer per call
-                // New: GPU shader = ~0.1ms, eliminates 100+ MB of transfers per run
-                let current_tets = state.current_tet_num;
-
-                queue.write_buffer(
-                    &state.pipelines.init_tet_to_flip_params,
-                    0,
-                    bytemuck::cast_slice(&[current_tets, 0u32, 0u32, 0u32]),
-                );
-
-                // BATCHED: Init buffer + build all flip traces + relocate in single submission
-                // Eliminates N submit/poll cycles (where N = number of flip batches)
+                state.cpu_profiler.begin("8_repair_vert_tet");
                 let mut encoder = device.create_command_encoder(&Default::default());
-
-                // GPU initialization of tet_to_flip
-                {
-                    let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
-                        label: Some("init_tet_to_flip"),
-                        timestamp_writes: None,
-                    });
-                    pass.set_pipeline(&state.pipelines.init_tet_to_flip_pipeline);
-                    pass.set_bind_group(0, Some(&state.pipelines.init_tet_to_flip_bind_group), &[]);
-                    pass.dispatch_workgroups((current_tets + 255) / 256, 1, 1);
-                }
-
-                // Build flip traces by iterating batches in REVERSE order
-                let mut next_flip_num = total_flips;
-                for i in (0..org_flip_num.len()).rev() {
-                    let prev_flip_num = org_flip_num[i];
-                    let flip_num = next_flip_num - prev_flip_num;
-
-                    state.dispatch_update_flip_trace(&mut encoder, queue, prev_flip_num, flip_num);
-
-                    next_flip_num = prev_flip_num;
-                }
-
-                // Now relocate points using the flip trace chains
-                state.dispatch_relocate_points_fast(&mut encoder, queue, num_uninserted, total_flips);
-
+                state.dispatch_update_uninserted_vert_tet(&mut encoder, queue, num_uninserted);
                 queue.submit(Some(encoder.finish()));
                 device.poll(wgpu::PollType::Wait { submission_index: None, timeout: None });
-                state.cpu_profiler.end("8_relocate");
+                state.cpu_profiler.end("8_repair_vert_tet");
             }
         }
 

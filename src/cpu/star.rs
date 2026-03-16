@@ -306,7 +306,14 @@ impl Star {
     /// **TODO:** Full implementation in progress - this is a simplified version
     pub fn do_flipping(&mut self) {
         let mut stack: Vec<u32> = Vec::new();
-        let mut is_non_extreme = vec![0i32; self.points.len()];
+        // Size to cover all vertex IDs that may appear in the star (including super-tet)
+        let max_vert = self.tri_vec.iter()
+            .flat_map(|t| t.v.iter())
+            .copied()
+            .max()
+            .unwrap_or(0) as usize;
+        let is_non_extreme_len = (max_vert + 1).max(self.points.len());
+        let mut is_non_extreme = vec![0i32; is_non_extreme_len];
         let visit_id = 1i32;
 
         // Start with all edges
@@ -332,10 +339,17 @@ impl Star {
             let opp = self.tri_opp_vec[tri_idx];
             let tri = self.tri_vec[tri_idx];
 
+            // Skip boundary faces (INVALID adjacency = star boundary)
+            if opp.t[vi] == crate::types::INVALID {
+                continue;
+            }
+
             let opp_tri = opp.get_opp_tri(vi) as usize;
             let opp_vi = opp.get_opp_vi(vi) as usize;
 
-            if self.tri_status_vec[opp_tri] == TriStatus::Free {
+            if opp_tri >= self.tri_status_vec.len()
+                || self.tri_status_vec[opp_tri] == TriStatus::Free
+            {
                 continue;
             }
 
@@ -375,18 +389,55 @@ impl Star {
                 continue;
             }
 
-            // Check for 3-1 flip possibility
-            if opp.get_opp_tri((vi + 1) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 2) % 3) {
-                if ort < 0 || min_vert == tri.v[(vi + 2) % 3] {
-                    self.flip31(tri_idx, vi, &mut stack);
+            // Check for 3-1 flip possibility.
+            // flip31 accesses: opp.t[vi], opp.t[(vi+1)%3], opp.t[(vi+2)%3],
+            //   tri_opp_vec[opp_tri].t[(opp_vi+1)%3], tri_opp_vec[side_tri].t[(side_vi+2)%3]
+            // All must be valid (not INVALID/boundary).
+            {
+                let all_valid = opp.t[(vi + 1) % 3] != crate::types::INVALID
+                    && opp.t[(vi + 2) % 3] != crate::types::INVALID
+                    && self.tri_opp_vec[opp_tri].t[(opp_vi + 1) % 3] != crate::types::INVALID
+                    && self.tri_opp_vec[opp_tri].t[(opp_vi + 2) % 3] != crate::types::INVALID;
+
+                if all_valid {
+                    let side_tri_idx = opp.get_opp_tri((vi + 1) % 3) as usize;
+                    let side_vi_idx = opp.get_opp_vi((vi + 1) % 3) as usize;
+                    let side_valid = side_tri_idx < self.tri_opp_vec.len()
+                        && self.tri_opp_vec[side_tri_idx].t[(side_vi_idx + 2) % 3] != crate::types::INVALID;
+
+                    if side_valid
+                        && opp.get_opp_tri((vi + 1) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 2) % 3)
+                    {
+                        if ort < 0 || min_vert == tri.v[(vi + 2) % 3] {
+                            self.flip31(tri_idx, vi, &mut stack);
+                        }
+                        continue;
+                    }
+
+                    let side2_tri_idx = opp.get_opp_tri((vi + 2) % 3) as usize;
+                    let side2_vi_idx = opp.get_opp_vi((vi + 2) % 3) as usize;
+                    let side2_valid = side2_tri_idx < self.tri_opp_vec.len()
+                        && self.tri_opp_vec[side2_tri_idx].t[(side2_vi_idx + 1) % 3] != crate::types::INVALID;
+
+                    if side2_valid
+                        && opp.get_opp_tri((vi + 2) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 1) % 3)
+                    {
+                        if ort < 0 || min_vert == tri.v[(vi + 1) % 3] {
+                            self.flip31(tri_idx, (vi + 2) % 3, &mut stack);
+                        }
+                        continue;
+                    }
                 }
-                continue;
             }
 
-            if opp.get_opp_tri((vi + 2) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 1) % 3) {
-                if ort < 0 || min_vert == tri.v[(vi + 1) % 3] {
-                    self.flip31(tri_idx, (vi + 2) % 3, &mut stack);
-                }
+            // Check all surrounding edges are valid before attempting any flip.
+            // Stars may have boundary (INVALID adjacency) when the GPU output is
+            // incomplete. CUDA assumes closed manifolds; we must guard against open ones.
+            if opp.t[(vi + 1) % 3] == crate::types::INVALID
+                || opp.t[(vi + 2) % 3] == crate::types::INVALID
+                || self.tri_opp_vec[opp_tri].t[(opp_vi + 1) % 3] == crate::types::INVALID
+                || self.tri_opp_vec[opp_tri].t[(opp_vi + 2) % 3] == crate::types::INVALID
+            {
                 continue;
             }
 
@@ -437,10 +488,17 @@ impl Star {
             stack.push(encode(tri_idx as u32, vi as u32));
 
             let opp = self.tri_opp_vec[tri_idx];
+            // Check for boundary (INVALID adjacency = star boundary)
+            if opp.t[(vi + 1) % 3] == crate::types::INVALID {
+                break;
+            }
             let next_tri = opp.get_opp_tri((vi + 1) % 3) as usize;
             let next_vi = opp.get_opp_vi((vi + 1) % 3) as usize;
 
             if next_tri == start_tri_idx {
+                break;
+            }
+            if next_tri >= self.tri_status_vec.len() {
                 break;
             }
 

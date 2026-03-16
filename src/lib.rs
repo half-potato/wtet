@@ -68,20 +68,94 @@ pub fn check_delaunay_quality(
             let pe = pts64[vb as usize];
 
             let orient = predicates::orient3d(pa, pb, pc, pd);
-            let insph = if orient > 0.0 {
-                predicates::insphere(pa, pb, pc, pd, pe)
+            let insph = predicates::insphere(pa, pb, pc, pd, pe);
+            // Violation = e inside circumsphere of (a,b,c,d)
+            // Shewchuk convention: insphere > 0 means inside when orient > 0,
+            //                      insphere < 0 means inside when orient < 0.
+            // Equivalently: insphere * orient > 0 means inside.
+            let is_violation = if orient > 0.0 {
+                insph > 0.0
             } else if orient < 0.0 {
-                -predicates::insphere(pa, pc, pb, pd, pe)
+                insph < 0.0
             } else {
                 continue;
             };
 
-            if insph > 0.0 {
+            if is_violation {
                 violations += 1;
             }
         }
     }
     Ok(violations)
+}
+
+/// Find the set of vertices involved in insphere violations (for star splaying).
+///
+/// Returns a deduplicated sorted list of vertex IDs. For each violated face,
+/// the opposite vertex (the one inside the circumsphere) is collected,
+/// matching the CUDA gather kernel behavior.
+pub fn find_violated_vertices(
+    points: &[[f32; 3]],
+    tets: &[[u32; 4]],
+    adjacency: &[[u32; 4]],
+    num_real_points: u32,
+) -> Vec<u32> {
+    let pts64: Vec<[f64; 3]> = points
+        .iter()
+        .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+        .collect();
+
+    let mut failed: std::collections::HashSet<u32> = std::collections::HashSet::new();
+    for ti in 0..tets.len() {
+        if tets[ti].iter().any(|&v| v >= num_real_points) {
+            continue;
+        }
+        for f in 0..4u32 {
+            let packed = adjacency[ti][f as usize];
+            if packed == INVALID {
+                continue;
+            }
+            let (opp_ti, opp_f) = decode_opp(packed);
+            if ti >= opp_ti as usize {
+                continue;
+            }
+            if opp_ti as usize >= tets.len() {
+                continue;
+            }
+            if tets[opp_ti as usize].iter().any(|&v| v >= num_real_points) {
+                continue;
+            }
+
+            let tet = tets[ti];
+            let opp_tet = tets[opp_ti as usize];
+            let vb = opp_tet[opp_f as usize];
+
+            let pa = pts64[tet[0] as usize];
+            let pb = pts64[tet[1] as usize];
+            let pc = pts64[tet[2] as usize];
+            let pd = pts64[tet[3] as usize];
+            let pe = pts64[vb as usize];
+
+            let orient = predicates::orient3d(pa, pb, pc, pd);
+            let insph = predicates::insphere(pa, pb, pc, pd, pe);
+            // Violation = e inside circumsphere of (a,b,c,d)
+            let is_violation = if orient > 0.0 {
+                insph > 0.0
+            } else if orient < 0.0 {
+                insph < 0.0
+            } else {
+                continue;
+            };
+
+            if is_violation {
+                // Collect the opposite vertex (inside circumsphere) — matches CUDA gather
+                failed.insert(vb);
+            }
+        }
+    }
+    let mut result: Vec<u32> = failed.into_iter().collect();
+    result.sort();
+    result
 }
 
 /// Returns the minimum wgpu limits required by gdel3d_wgpu.
@@ -117,10 +191,34 @@ pub async fn delaunay_3d(
     eprintln!("[DELAUNAY] ✓ GpuState created");
     phase1::run(device, queue, &mut state, config).await;
 
-    // Phase 2: CPU star splaying (optional)
+    // Phase 2: CPU fixup (optional)
     let mut result = state.readback(device, queue).await;
-    if config.enable_splaying && !result.failed_verts.is_empty() {
-        phase2::splay(&normalized, &mut result);
+    // Rebuild adjacency from scratch (GPU adjacency may be corrupted by flip races)
+    phase2::rebuild_adjacency(&mut result);
+    if config.enable_splaying {
+        // Detect insphere violations on CPU using rebuilt (correct) adjacency
+        // The GPU gather shader uses GPU adjacency which may miss violations.
+        let num_real = normalized.len() as u32;
+        let violations = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
+            .unwrap_or(0);
+        if violations > 0 {
+            eprintln!("[DELAUNAY] Phase 2: {} insphere violations, running CPU bistellar flips", violations);
+            // Build extended points array including super-tet vertices
+            // (same coordinates as GPU: gpu/mod.rs lines 151-155)
+            let big = 100.0_f32;
+            let mut extended_points = normalized.clone();
+            extended_points.push([-big, -big, -big]);           // n+0
+            extended_points.push([4.0 * big, -big, -big]);      // n+1
+            extended_points.push([-big, 4.0 * big, -big]);      // n+2
+            extended_points.push([-big, -big, 4.0 * big]);      // n+3
+            extended_points.push([10.0 * big, 10.0 * big, 10.0 * big]); // n+4 (infinity)
+
+            // Direct CPU bistellar flips (works with incomplete triangulations)
+            phase2::cpu_flip_violations(&extended_points, &mut result, num_real);
+            // Rebuild adjacency after CPU flips
+            phase2::rebuild_adjacency(&mut result);
+
+        }
     }
 
     result

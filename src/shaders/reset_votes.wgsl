@@ -8,6 +8,7 @@
 @group(0) @binding(3) var<uniform> params: vec4<u32>; // x = max_tets, y = num_uninserted
 
 const NO_VOTE: i32 = i32(0x80000000u);  // Minimum i32 for atomicMax voting
+const FLIP_NO_VOTE: i32 = i32(0x7FFFFFFFu);  // Maximum i32 for atomicMin flip voting
 const INVALID: u32 = 0xFFFFFFFFu;
 
 @compute @workgroup_size(256)
@@ -27,5 +28,19 @@ fn reset_votes(
     // Reset vertex sphere values
     if idx < num_uninserted {
         vert_sphere[idx] = NO_VOTE;
+    }
+}
+
+// Reset tet_vote for flip voting (atomicMin, so initialize to INT_MAX).
+// Separate from reset_votes because flip voting uses the opposite sentinel.
+@compute @workgroup_size(256)
+fn reset_flip_votes(
+    @builtin(global_invocation_id) gid: vec3<u32>,
+) {
+    let idx = gid.x;
+    let max_tets = params.x;
+
+    if idx < max_tets {
+        atomicStore(&tet_vote[idx], FLIP_NO_VOTE);
     }
 }
