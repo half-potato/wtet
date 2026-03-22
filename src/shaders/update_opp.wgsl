@@ -52,11 +52,22 @@ fn load_flip_tet_idx(flip_idx: u32) -> vec3<i32> {
     return vec3<i32>(item1.y, item1.z, item1.w);
 }
 
+// CUDA convention: makePositive(v) = -(v + 2), inverse of makeNegative(v) = -(v + 2)
+// For Flip32's _t[2] = -(tet_c + 2): make_positive(-(tet_c + 2)) = tet_c
 fn make_positive(val: i32) -> u32 {
-    if val < 0 {
-        return u32(-val);
+    return u32(-(val + 2));
+}
+
+// Strip stale OPP flags (OPP_INTERNAL=bit2, OPP_SPECIAL=bit3, OPP_SPHERE_FAIL=bit4)
+// from external opp values inherited from old tets. Only preserves tet_idx and vi.
+// CRITICAL: Must preserve INVALID (0xFFFFFFFF) values! Without this check,
+// INVALID gets corrupted to 0xFFFFFFE3 which looks like a valid neighbor at
+// out-of-bounds index, causing check_delaunay to test wrong vertex data.
+fn clean_ext_opp(val: u32) -> u32 {
+    if val == 0xFFFFFFFFu {
+        return val;  // Preserve INVALID
     }
-    return u32(val);
+    return (val & 0xFFFFFFE0u) | (val & 3u);  // Keep bits 5+ (tet_idx) and bits 0-1 (vi)
 }
 
 @compute @workgroup_size(256)
@@ -71,37 +82,45 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
 
     // Load tet indices (CUDA: FlipItemTetIdx)
     // tet_idx.x = _t[0] = botTetIdx, .y = _t[1] = topTetIdx, .z = _t[2] = sideTetIdx
-    let tet_idx = load_flip_tet_idx(flip_idx);
+    // CRITICAL: Read at global index (org_flip_num + flip_idx) since flip.wgsl writes at global indices
+    // CUDA: receives flipVec = _flipVec + orgFlipNum (offset pointer), so flipVec[flipIdx] = _flipVec[orgFlipNum + flipIdx]
+    let glob_idx = org_flip_num + flip_idx;
+    let tet_idx = load_flip_tet_idx(glob_idx);
     let is_flip23 = tet_idx.z >= 0;
 
-    let encoded_face_vi = encoded_face_vi_arr[flip_idx];
+    let encoded_face_vi = encoded_face_vi_arr[glob_idx];
     var ext_opp: array<u32, 6>;
 
     // Load external opposites from tet 0 (botTetIdx)
+    // CRITICAL: Strip stale OPP_INTERNAL/SPECIAL/SPHERE_FAIL flags from old tet values.
+    // These flags are only meaningful for the old tet's faces, not the new tet's external faces.
+    // CUDA preserves stale flags because it re-checks ALL changed tets from both sides,
+    // but our flip queue only contains new tets, so stale OPP_INTERNAL would cause
+    // the flip shader to incorrectly skip legitimate external faces.
     let base0 = u32(tet_idx.x) * 4u;
     if is_flip23 {
-        ext_opp[0] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 10u) & 3u)]);
-        ext_opp[2] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 6u) & 3u)]);
-        ext_opp[4] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 2u) & 3u)]);
+        ext_opp[0] = clean_ext_opp(atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 10u) & 3u)]));
+        ext_opp[2] = clean_ext_opp(atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 6u) & 3u)]));
+        ext_opp[4] = clean_ext_opp(atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 2u) & 3u)]));
     } else {
-        ext_opp[0] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 10u) & 3u)]);
-        ext_opp[1] = atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 8u) & 3u)]);
+        ext_opp[0] = clean_ext_opp(atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 10u) & 3u)]));
+        ext_opp[1] = clean_ext_opp(atomicLoad(&opp_arr[base0 + ((u32(encoded_face_vi) >> 8u) & 3u)]));
     }
 
     // Load external opposites from tet 1 (topTetIdx)
     let base1 = u32(tet_idx.y) * 4u;
     if is_flip23 {
-        ext_opp[1] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 8u) & 3u)]);
-        ext_opp[3] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]);
-        ext_opp[5] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 0u) & 3u)]);
+        ext_opp[1] = clean_ext_opp(atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 8u) & 3u)]));
+        ext_opp[3] = clean_ext_opp(atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]));
+        ext_opp[5] = clean_ext_opp(atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 0u) & 3u)]));
     } else {
-        ext_opp[2] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 6u) & 3u)]);
-        ext_opp[3] = atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]);
+        ext_opp[2] = clean_ext_opp(atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 6u) & 3u)]));
+        ext_opp[3] = clean_ext_opp(atomicLoad(&opp_arr[base1 + ((u32(encoded_face_vi) >> 4u) & 3u)]));
 
         // Load from tet 2 (sideTetIdx) for 3-2 flip
         let base2 = make_positive(tet_idx.z) * 4u;
-        ext_opp[4] = atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 2u) & 3u)]);
-        ext_opp[5] = atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 0u) & 3u)]);
+        ext_opp[4] = clean_ext_opp(atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 2u) & 3u)]));
+        ext_opp[5] = clean_ext_opp(atomicLoad(&opp_arr[base2 + ((u32(encoded_face_vi) >> 0u) & 3u)]));
     }
 
     // Update with neighbors (CUDA: KerDivision.cu:611-651)
@@ -140,12 +159,12 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
             atomicStore(&opp_arr[opp_idx * 4u + opp_vi], make_opp_val(new_tet_idx, vi));
         } else {
             // Neighbor flipped - update my own opp
-            let opp_flip_idx = u32(msg.y) - org_flip_num;
             let new_loc_opp_idx = get_tet_idx(msg.x, opp_vi);
 
             if new_loc_opp_idx != 3u {
                 // CUDA: oppIdx = flipVec[oppFlipIdx]._t[newLocOppIdx]
-                let opp_tet = load_flip_tet_idx(opp_flip_idx);
+                // msg.y is the global flip index, use directly since flip_arr uses global indices
+                let opp_tet = load_flip_tet_idx(u32(msg.y));
                 if new_loc_opp_idx == 0u { opp_idx = u32(opp_tet.x); }
                 else if new_loc_opp_idx == 1u { opp_idx = u32(opp_tet.y); }
                 else { opp_idx = u32(opp_tet.z); }
@@ -157,6 +176,10 @@ fn update_opp(@builtin(global_invocation_id) gid: vec3<u32>) {
     }
 
     // Write updated opp arrays (CUDA: KerDivision.cu:653-691)
+    // Note: ext_opp values may carry stale flags (OPP_INTERNAL etc.) from the old
+    // tets. CUDA preserves these too — stale flags are handled because checkDelaunay
+    // retains rejected tets in the active list, so the face gets checked from the
+    // neighbor's (clean) side.
     if is_flip23 {
         // Tet 0
         let out0 = u32(tet_idx.x) * 4u;

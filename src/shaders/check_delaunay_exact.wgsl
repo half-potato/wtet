@@ -59,15 +59,32 @@ fn is_opp_internal(opp: u32) -> bool {
     return (opp & 4u) != 0u;
 }
 
+// CUDA: makeNegative(v) = -(v + 2), escapes -1 sentinel (KerCommon.h:192-195)
 fn make_negative(val: i32) -> i32 {
-    return -val - 1;
+    return -(val + 2);
 }
 
 fn make_positive(val: i32) -> i32 {
-    if val >= 0 {
-        return val;
-    }
-    return -val - 1;
+    return -(val + 2);
+}
+
+fn tet_vertex_val(tet: vec4<u32>, i: u32) -> u32 {
+    if i == 0u { return tet.x; }
+    else if i == 1u { return tet.y; }
+    else if i == 2u { return tet.z; }
+    else { return tet.w; }
+}
+
+fn orient3d_simple(a: vec3<f32>, b: vec3<f32>, c: vec3<f32>, d: vec3<f32>) -> i32 {
+    let ad = a - d;
+    let bd = b - d;
+    let cd = c - d;
+    let det = ad.x * (bd.y * cd.z - bd.z * cd.y)
+            + bd.x * (cd.y * ad.z - cd.z * ad.y)
+            + cd.x * (ad.y * bd.z - ad.z * bd.y);
+    if det > 0.0 { return 1; }
+    else if det < 0.0 { return -1; }
+    return 0;
 }
 
 fn make_flip(bot_vi: u32, bot_cor_ord_vi: u32) -> u32 {
@@ -95,47 +112,201 @@ fn vote_for_flip32(vote_offset: u32, bot_ti: u32, top_ti: u32, bot_opp_ti: u32) 
 
 // --- SoS (Simulation of Simplicity) tie-breaking ---
 
-// Simple index-based SoS for insphere (5 vertices)
-// Uses bubble sort to compute permutation parity
-fn sos_insphere_index(va: u32, vb: u32, vc: u32, vd: u32, ve: u32) -> i32 {
-    var indices = array<u32, 5>(va, vb, vc, vd, ve);
-    var parity = 0u;
-
-    // Bubble sort to count swaps
-    for (var i = 0u; i < 4u; i++) {
-        for (var j = 0u; j < 4u - i; j++) {
-            if indices[j] > indices[j + 1u] {
-                // Swap
-                let tmp = indices[j];
-                indices[j] = indices[j + 1u];
-                indices[j + 1u] = tmp;
-                parity ^= 1u;
-            }
-        }
-    }
-
-    // Even parity = +1, odd parity = -1
-    return select(-1, 1, parity == 0u);
+// Exact orient2d using DD: det = (pa[0]-pc[0])*(pb[1]-pc[1]) - (pa[1]-pc[1])*(pb[0]-pc[0])
+fn orient2d_exact_2(pa0: f32, pa1: f32, pb0: f32, pb1: f32, pc0: f32, pc1: f32) -> f32 {
+    let t1 = dd_mul(dd_from_f32(pa0 - pc0), dd_from_f32(pb1 - pc1));
+    let t2 = dd_mul(dd_from_f32(pa1 - pc1), dd_from_f32(pb0 - pc0));
+    let det = dd_sub(t1, t2);
+    if det.hi != 0.0 { return det.hi; }
+    return det.lo;
 }
 
-// Simple index-based SoS for orient3d (4 vertices)
-fn sos_orient3d_index(va: u32, vb: u32, vc: u32, vd: u32) -> i32 {
-    var indices = array<u32, 4>(va, vb, vc, vd);
-    var parity = 0u;
+// --- Lifted predicate helpers for insphere SoS ---
+// CUDA: orient3dFastExact_Lifted (KerShewchuk.h:2016)
+// When lifted=true, z-column replaced by x²+y²+z² (squared distance)
+// For non-lifted: standard orient3d on (col0, col1, col2)
+// For lifted: orient3d on (col0, col1, lift) where lift = col0²-col1²+col2²
+// Uses DD arithmetic (approximate for lifted, but sufficient for f32 grid inputs)
 
-    // Bubble sort to count swaps
-    for (var i = 0u; i < 3u; i++) {
-        for (var j = 0u; j < 3u - i; j++) {
-            if indices[j] > indices[j + 1u] {
-                let tmp = indices[j];
-                indices[j] = indices[j + 1u];
-                indices[j + 1u] = tmp;
-                parity ^= 1u;
-            }
-        }
+// orient3d_lifted_dd: 4-point orient3d, optionally with lifted z-coordinate
+// When lifted=false: det of (a0-d0, a1-d1, a2-d2) rows for each point
+// When lifted=true: z replaced by x²+y²+z² for each point
+fn orient3d_lifted_dd(
+    a0: f32, a1: f32, a2: f32,
+    b0: f32, b1: f32, b2: f32,
+    c0: f32, c1: f32, c2: f32,
+    d0: f32, d1: f32, d2: f32,
+    lifted: bool
+) -> i32 {
+    let adx = dd_from_f32(a0 - d0);
+    let ady = dd_from_f32(a1 - d1);
+    let bdx = dd_from_f32(b0 - d0);
+    let bdy = dd_from_f32(b1 - d1);
+    let cdx = dd_from_f32(c0 - d0);
+    let cdy = dd_from_f32(c1 - d1);
+
+    var adz: DD;
+    var bdz: DD;
+    var cdz: DD;
+    if lifted {
+        // z = x²+y²+z² (lifted coordinate = squared Euclidean norm)
+        // CUDA: adz = adx*adx + ady*ady + adz*adz (KerShewchuk.h:2044)
+        let adz_raw = dd_from_f32(a2 - d2);
+        adz = dd_add(dd_add(dd_mul(adx, adx), dd_mul(ady, ady)), dd_mul(adz_raw, adz_raw));
+        let bdz_raw = dd_from_f32(b2 - d2);
+        bdz = dd_add(dd_add(dd_mul(bdx, bdx), dd_mul(bdy, bdy)), dd_mul(bdz_raw, bdz_raw));
+        let cdz_raw = dd_from_f32(c2 - d2);
+        cdz = dd_add(dd_add(dd_mul(cdx, cdx), dd_mul(cdy, cdy)), dd_mul(cdz_raw, cdz_raw));
+    } else {
+        adz = dd_from_f32(a2 - d2);
+        bdz = dd_from_f32(b2 - d2);
+        cdz = dd_from_f32(c2 - d2);
     }
 
-    return select(-1, 1, parity == 0u);
+    let t1 = dd_sub(dd_mul(bdy, cdz), dd_mul(bdz, cdy));
+    let t2 = dd_sub(dd_mul(cdy, adz), dd_mul(cdz, ady));
+    let t3 = dd_sub(dd_mul(ady, bdz), dd_mul(adz, bdy));
+    let det = dd_add(dd_add(dd_mul(adx, t1), dd_mul(bdx, t2)), dd_mul(cdx, t3));
+    return dd_sign(det);
+}
+
+// orient2d_lifted_dd: 3-point orient2d, optionally with lifted 2nd coordinate
+// When lifted=false: det of 2x2 matrix [(a0-c0, a1-c1), (b0-b0, b1-c1)]
+// When lifted=true: col1 replaced by x²-y²+z² where x=col0, y=col1, z=col2
+// CUDA: orient2dExact_Lifted (KerShewchuk.h:1801)
+fn orient2d_lifted_dd(
+    a0: f32, a1: f32, a2: f32,
+    b0: f32, b1: f32, b2: f32,
+    c0: f32, c1: f32, c2: f32,
+    lifted: bool
+) -> i32 {
+    if !lifted {
+        // Standard orient2d: (a0-c0)*(b1-c1) - (a1-c1)*(b0-c0)
+        let r = orient2d_exact_2(a0, a1, b0, b1, c0, c1);
+        if r > 0.0 { return 1; }
+        if r < 0.0 { return -1; }
+        return 0;
+    }
+    // Lifted: replace col1 with lift = col0² - col1² + col2²
+    // CUDA computes: palift = pa[0]² - pa[1]² + pa[2]² (exact expansion)
+    // We use DD: lift_a = a0*a0 - a1*a1 + a2*a2
+    let la = dd_add(dd_sub(dd_mul(dd_from_f32(a0), dd_from_f32(a0)),
+                           dd_mul(dd_from_f32(a1), dd_from_f32(a1))),
+                    dd_mul(dd_from_f32(a2), dd_from_f32(a2)));
+    let lb = dd_add(dd_sub(dd_mul(dd_from_f32(b0), dd_from_f32(b0)),
+                           dd_mul(dd_from_f32(b1), dd_from_f32(b1))),
+                    dd_mul(dd_from_f32(b2), dd_from_f32(b2)));
+    let lc = dd_add(dd_sub(dd_mul(dd_from_f32(c0), dd_from_f32(c0)),
+                           dd_mul(dd_from_f32(c1), dd_from_f32(c1))),
+                    dd_mul(dd_from_f32(c2), dd_from_f32(c2)));
+    // orient2d with (col0, lift): det = (a0-c0)*(lb-lc) - (la-lc)*(b0-c0)
+    let t1 = dd_mul(dd_from_f32(a0 - c0), dd_sub(lb, lc));
+    let t2 = dd_mul(dd_sub(la, lc), dd_from_f32(b0 - c0));
+    let det = dd_sub(t1, t2);
+    return dd_sign(det);
+}
+
+// orient1d_lifted_dd: 2-point comparison, optionally lifted
+// When lifted=false: sign of (a0 - b0)
+// When lifted=true: sign of (a.x²+a.y²+a.z² - b.x²-b.y²-b.z²)
+// CUDA: orient1dExact_Lifted (KerShewchuk.h:1751)
+fn orient1d_lifted_dd(
+    a0: f32, a1: f32, a2: f32,
+    b0: f32, b1: f32, b2: f32,
+    lifted: bool
+) -> i32 {
+    if !lifted {
+        if a0 > b0 { return 1; }
+        if a0 < b0 { return -1; }
+        return 0;
+    }
+    // Lifted: (a0²+a1²+a2²) - (b0²+b1²+b2²)
+    let aa = dd_add(dd_add(dd_mul(dd_from_f32(a0), dd_from_f32(a0)),
+                           dd_mul(dd_from_f32(a1), dd_from_f32(a1))),
+                    dd_mul(dd_from_f32(a2), dd_from_f32(a2)));
+    let bb = dd_add(dd_add(dd_mul(dd_from_f32(b0), dd_from_f32(b0)),
+                           dd_mul(dd_from_f32(b1), dd_from_f32(b1))),
+                    dd_mul(dd_from_f32(b2), dd_from_f32(b2)));
+    return dd_sign(dd_sub(aa, bb));
+}
+
+// Port of CUDA doOrient3DSoSOnly (KerPredWrapper.h:131-235)
+// Edelsbrunner-Mücke SoS perturbation scheme for orient3d
+// Called when exact orient3d returns 0 (degenerate configuration)
+fn sos_orient3d(
+    va: u32, vb: u32, vc: u32, vd: u32,
+    pa: vec3<f32>, pb: vec3<f32>, pc: vec3<f32>, pd: vec3<f32>
+) -> i32 {
+    // Sort vertices by index, track parity
+    var v = array<u32, 4>(va, vb, vc, vd);
+    var p = array<vec3<f32>, 4>(pa, pb, pc, pd);
+    var pn = 1;
+
+    // Sorting network for 4 elements (matches CUDA's swap sequence)
+    if v[0] > v[2] { let tv = v[0]; v[0] = v[2]; v[2] = tv; let tp = p[0]; p[0] = p[2]; p[2] = tp; pn = -pn; }
+    if v[1] > v[3] { let tv = v[1]; v[1] = v[3]; v[3] = tv; let tp = p[1]; p[1] = p[3]; p[3] = tp; pn = -pn; }
+    if v[0] > v[1] { let tv = v[0]; v[0] = v[1]; v[1] = tv; let tp = p[0]; p[0] = p[1]; p[1] = tp; pn = -pn; }
+    if v[2] > v[3] { let tv = v[2]; v[2] = v[3]; v[3] = tv; let tp = p[2]; p[2] = p[3]; p[3] = tp; pn = -pn; }
+    if v[1] > v[2] { let tv = v[1]; v[1] = v[2]; v[2] = tv; let tp = p[1]; p[1] = p[2]; p[2] = tp; pn = -pn; }
+
+    // Cascade through sub-determinants (14 levels)
+    // Each level computes an increasingly lower-dimensional predicate
+    var result: f32 = 0.0;
+
+    // Depth 0: orient2d(p[1],p[2],p[3]) on (x,y)
+    result = orient2d_exact_2(p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y);
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 1: orient2d(p[1],p[2],p[3]) on (x,z) — negate
+    result = orient2d_exact_2(p[1].x, p[1].z, p[2].x, p[2].z, p[3].x, p[3].z);
+    if result != 0.0 { return select(-1, 1, (-result * f32(pn)) > 0.0); }
+
+    // Depth 2: orient2d(p[1],p[2],p[3]) on (y,z)
+    result = orient2d_exact_2(p[1].y, p[1].z, p[2].y, p[2].z, p[3].y, p[3].z);
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 3: orient2d(p[0],p[2],p[3]) on (x,y) — negate
+    result = orient2d_exact_2(p[0].x, p[0].y, p[2].x, p[2].y, p[3].x, p[3].y);
+    if result != 0.0 { return select(-1, 1, (-result * f32(pn)) > 0.0); }
+
+    // Depth 4: p[2].x - p[3].x
+    result = p[2].x - p[3].x;
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 5: p[2].y - p[3].y — negate
+    result = p[2].y - p[3].y;
+    if result != 0.0 { return select(-1, 1, (-result * f32(pn)) > 0.0); }
+
+    // Depth 6: orient2d(p[0],p[2],p[3]) on (x,z)
+    result = orient2d_exact_2(p[0].x, p[0].z, p[2].x, p[2].z, p[3].x, p[3].z);
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 7: p[2].z - p[3].z
+    result = p[2].z - p[3].z;
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 8: orient2d(p[0],p[2],p[3]) on (y,z) — negate
+    result = orient2d_exact_2(p[0].y, p[0].z, p[2].y, p[2].z, p[3].y, p[3].z);
+    if result != 0.0 { return select(-1, 1, (-result * f32(pn)) > 0.0); }
+
+    // Depth 9: orient2d(p[0],p[1],p[3]) on (x,y)
+    result = orient2d_exact_2(p[0].x, p[0].y, p[1].x, p[1].y, p[3].x, p[3].y);
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 10: p[1].x - p[3].x — negate
+    result = p[1].x - p[3].x;
+    if result != 0.0 { return select(-1, 1, (-result * f32(pn)) > 0.0); }
+
+    // Depth 11: p[1].y - p[3].y
+    result = p[1].y - p[3].y;
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 12: p[0].x - p[3].x
+    result = p[0].x - p[3].x;
+    if result != 0.0 { return select(-1, 1, (result * f32(pn)) > 0.0); }
+
+    // Depth 13: always 1.0 (guaranteed non-zero)
+    return select(-1, 1, f32(pn) > 0.0);
 }
 
 // --- Include predicates.wgsl functions (DD arithmetic + exact predicates) ---
@@ -367,6 +538,237 @@ fn insphere_exact(
     return insphere_dd(ax, ay, az, bx, by, bz, cx, cy, cz, dx, dy, dz, ex, ey, ez);
 }
 
+// --- SoS insphere: Edelsbrunner-Mücke 49-level cascade ---
+// Port of CUDA doInSphereSoSOnly (KerPredWrapper.h:314-777)
+// Called when exact insphere returns 0 (degenerate configuration)
+fn sos_insphere(
+    va: u32, vb: u32, vc: u32, vd: u32, ve: u32,
+    pa: vec3<f32>, pb: vec3<f32>, pc: vec3<f32>, pd: vec3<f32>, pe: vec3<f32>
+) -> i32 {
+    // Sort 5 vertices by index, track coordinates with them
+    // 9-swap sorting network (CUDA: KerPredWrapper.h:326-334)
+    var v = array<u32, 5>(va, vb, vc, vd, ve);
+    var p = array<vec3<f32>, 5>(pa, pb, pc, pd, pe);
+    var sc = 0;
+
+    if v[0] > v[4] { let tv=v[0]; v[0]=v[4]; v[4]=tv; let tp=p[0]; p[0]=p[4]; p[4]=tp; sc++; }
+    if v[1] > v[3] { let tv=v[1]; v[1]=v[3]; v[3]=tv; let tp=p[1]; p[1]=p[3]; p[3]=tp; sc++; }
+    if v[0] > v[2] { let tv=v[0]; v[0]=v[2]; v[2]=tv; let tp=p[0]; p[0]=p[2]; p[2]=tp; sc++; }
+    if v[2] > v[4] { let tv=v[2]; v[2]=v[4]; v[4]=tv; let tp=p[2]; p[2]=p[4]; p[4]=tp; sc++; }
+    if v[0] > v[1] { let tv=v[0]; v[0]=v[1]; v[1]=tv; let tp=p[0]; p[0]=p[1]; p[1]=tp; sc++; }
+    if v[2] > v[3] { let tv=v[2]; v[2]=v[3]; v[3]=tv; let tp=p[2]; p[2]=p[3]; p[3]=tp; sc++; }
+    if v[1] > v[4] { let tv=v[1]; v[1]=v[4]; v[4]=tv; let tp=p[1]; p[1]=p[4]; p[4]=tp; sc++; }
+    if v[1] > v[2] { let tv=v[1]; v[1]=v[2]; v[2]=tv; let tp=p[1]; p[1]=p[2]; p[2]=tp; sc++; }
+    if v[3] > v[4] { let tv=v[3]; v[3]=v[4]; v[4]=tv; let tp=p[3]; p[3]=p[4]; p[4]=tp; sc++; }
+
+    // ip[i] = p[i], indexed as ip[i].x/y/z = ip[i][0]/[1]/[2]
+
+    var orient: i32;
+
+    // Depth 1: orient3d(ip[1],ip[2],ip[3],ip[4]) — non-lifted
+    orient = orient3d_lifted_dd(p[1].x,p[1].y,p[1].z, p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 2: orient3d(ip[1],ip[2],ip[3],ip[4]) — lifted, cols(x,y,z)
+    orient = orient3d_lifted_dd(p[1].x,p[1].y,p[1].z, p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 3: orient3d lifted, cols(x,z,y) — note swapped y/z in cols 1,2
+    orient = orient3d_lifted_dd(p[1].x,p[1].z,p[1].y, p[2].x,p[2].z,p[2].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 4: orient3d lifted, cols(y,z,x) — swapped
+    orient = orient3d_lifted_dd(p[1].y,p[1].z,p[1].x, p[2].y,p[2].z,p[2].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 5: orient3d(ip[0],ip[2],ip[3],ip[4]) — non-lifted
+    orient = orient3d_lifted_dd(p[0].x,p[0].y,p[0].z, p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 6: orient2d(ip[2],ip[3],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 7: orient2d cols(x,z) — non-lifted (note: reuses ip[2..4] with col1=z)
+    orient = orient2d_lifted_dd(p[2].x,p[2].z,p[2].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 8: orient2d cols(y,z) — non-lifted
+    orient = orient2d_lifted_dd(p[2].y,p[2].z,p[2].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 9: orient3d(ip[0],ip[2],ip[3],ip[4]) — lifted
+    orient = orient3d_lifted_dd(p[0].x,p[0].y,p[0].z, p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 10: orient2d(ip[2],ip[3],ip[4]) — lifted
+    orient = orient2d_lifted_dd(p[2].x,p[2].y,p[2].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 11: orient2d lifted, cols(y,x,z) for ip[2..4]
+    orient = orient2d_lifted_dd(p[2].y,p[2].x,p[2].z, p[3].y,p[3].x,p[3].z, p[4].y,p[4].x,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 12: orient3d lifted, cols(x,z,y) for ip[0],ip[2..4]
+    orient = orient3d_lifted_dd(p[0].x,p[0].z,p[0].y, p[2].x,p[2].z,p[2].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 13: orient2d lifted, cols(z,x,y) for ip[2..4]
+    orient = orient2d_lifted_dd(p[2].z,p[2].x,p[2].y, p[3].z,p[3].x,p[3].y, p[4].z,p[4].x,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 14: orient3d lifted, cols(y,z,x) for ip[0],ip[2..4]
+    orient = orient3d_lifted_dd(p[0].y,p[0].z,p[0].x, p[2].y,p[2].z,p[2].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 15: orient3d(ip[0],ip[1],ip[3],ip[4]) — non-lifted
+    orient = orient3d_lifted_dd(p[0].x,p[0].y,p[0].z, p[1].x,p[1].y,p[1].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 16: orient2d(ip[1],ip[3],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[1].x,p[1].y,p[1].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 17: orient2d(ip[1],ip[3],ip[4]) cols(x,z) — non-lifted
+    orient = orient2d_lifted_dd(p[1].x,p[1].z,p[1].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 18: orient2d(ip[1],ip[3],ip[4]) cols(y,z) — non-lifted
+    orient = orient2d_lifted_dd(p[1].y,p[1].z,p[1].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 19: orient2d(ip[0],ip[3],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].y,p[0].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 20: orient1d ip[3] vs ip[4], col x — non-lifted
+    orient = orient1d_lifted_dd(p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 21: orient1d ip[3] vs ip[4], col y — non-lifted
+    let d21 = p[3].y - p[4].y;
+    if d21 != 0.0 { return sos_apply(select(-1, 1, d21 > 0.0), sc, false); }
+
+    // Depth 22: orient2d(ip[0],ip[3],ip[4]) cols(x,z) — non-lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].z,p[0].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 23: orient1d ip[3] vs ip[4], col z — non-lifted
+    let d23 = p[3].z - p[4].z;
+    if d23 != 0.0 { return sos_apply(select(-1, 1, d23 > 0.0), sc, true); }
+
+    // Depth 24: orient2d(ip[0],ip[3],ip[4]) cols(y,z) — non-lifted
+    orient = orient2d_lifted_dd(p[0].y,p[0].z,p[0].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 25: orient3d(ip[0],ip[1],ip[3],ip[4]) — lifted
+    orient = orient3d_lifted_dd(p[0].x,p[0].y,p[0].z, p[1].x,p[1].y,p[1].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 26: orient2d(ip[1],ip[3],ip[4]) — lifted
+    orient = orient2d_lifted_dd(p[1].x,p[1].y,p[1].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 27: orient2d lifted, cols(y,x,z) for ip[1],ip[3],ip[4]
+    orient = orient2d_lifted_dd(p[1].y,p[1].x,p[1].z, p[3].y,p[3].x,p[3].z, p[4].y,p[4].x,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 28: orient2d(ip[0],ip[3],ip[4]) — lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].y,p[0].z, p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 29: orient1d ip[3] vs ip[4] — lifted
+    orient = orient1d_lifted_dd(p[3].x,p[3].y,p[3].z, p[4].x,p[4].y,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 30: orient2d lifted, cols(y,x,z) for ip[0],ip[3],ip[4]
+    orient = orient2d_lifted_dd(p[0].y,p[0].x,p[0].z, p[3].y,p[3].x,p[3].z, p[4].y,p[4].x,p[4].z, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 31: orient3d lifted, cols(x,z,y) for ip[0],ip[1],ip[3],ip[4]
+    orient = orient3d_lifted_dd(p[0].x,p[0].z,p[0].y, p[1].x,p[1].z,p[1].y, p[3].x,p[3].z,p[3].y, p[4].x,p[4].z,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 32: orient2d lifted, cols(z,x,y) for ip[1],ip[3],ip[4]
+    orient = orient2d_lifted_dd(p[1].z,p[1].x,p[1].y, p[3].z,p[3].x,p[3].y, p[4].z,p[4].x,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 33: orient2d lifted, cols(z,x,y) for ip[0],ip[3],ip[4]
+    orient = orient2d_lifted_dd(p[0].z,p[0].x,p[0].y, p[3].z,p[3].x,p[3].y, p[4].z,p[4].x,p[4].y, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 34: orient3d lifted, cols(y,z,x) for ip[0],ip[1],ip[3],ip[4]
+    orient = orient3d_lifted_dd(p[0].y,p[0].z,p[0].x, p[1].y,p[1].z,p[1].x, p[3].y,p[3].z,p[3].x, p[4].y,p[4].z,p[4].x, true);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 35: orient3d(ip[0],ip[1],ip[2],ip[4]) — non-lifted
+    orient = orient3d_lifted_dd(p[0].x,p[0].y,p[0].z, p[1].x,p[1].y,p[1].z, p[2].x,p[2].y,p[2].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 36: orient2d(ip[1],ip[2],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[1].x,p[1].y,p[1].z, p[2].x,p[2].y,p[2].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 37: orient2d(ip[1],ip[2],ip[4]) cols(x,z) — non-lifted
+    orient = orient2d_lifted_dd(p[1].x,p[1].z,p[1].y, p[2].x,p[2].z,p[2].y, p[4].x,p[4].z,p[4].y, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 38: orient2d(ip[1],ip[2],ip[4]) cols(y,z) — non-lifted
+    orient = orient2d_lifted_dd(p[1].y,p[1].z,p[1].x, p[2].y,p[2].z,p[2].x, p[4].y,p[4].z,p[4].x, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 39: orient2d(ip[0],ip[2],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].y,p[0].z, p[2].x,p[2].y,p[2].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 40: orient1d ip[2] vs ip[4], col x — non-lifted
+    let d40 = p[2].x - p[4].x;
+    if d40 != 0.0 { return sos_apply(select(-1, 1, d40 > 0.0), sc, false); }
+
+    // Depth 41: orient1d ip[2] vs ip[4], col y — non-lifted
+    let d41 = p[2].y - p[4].y;
+    if d41 != 0.0 { return sos_apply(select(-1, 1, d41 > 0.0), sc, true); }
+
+    // Depth 42: orient2d(ip[0],ip[2],ip[4]) cols(x,z) — non-lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].z,p[0].y, p[2].x,p[2].z,p[2].y, p[4].x,p[4].z,p[4].y, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 43: orient1d ip[2] vs ip[4], col z — non-lifted
+    let d43 = p[2].z - p[4].z;
+    if d43 != 0.0 { return sos_apply(select(-1, 1, d43 > 0.0), sc, false); }
+
+    // Depth 44: orient2d(ip[0],ip[2],ip[4]) cols(y,z) — non-lifted
+    orient = orient2d_lifted_dd(p[0].y,p[0].z,p[0].x, p[2].y,p[2].z,p[2].x, p[4].y,p[4].z,p[4].x, false);
+    if orient != 0 { return sos_apply(orient, sc, true); }
+
+    // Depth 45: orient2d(ip[0],ip[1],ip[4]) cols(x,y) — non-lifted
+    orient = orient2d_lifted_dd(p[0].x,p[0].y,p[0].z, p[1].x,p[1].y,p[1].z, p[4].x,p[4].y,p[4].z, false);
+    if orient != 0 { return sos_apply(orient, sc, false); }
+
+    // Depth 46: orient1d ip[1] vs ip[4], col x — non-lifted
+    let d46 = p[1].x - p[4].x;
+    if d46 != 0.0 { return sos_apply(select(-1, 1, d46 > 0.0), sc, true); }
+
+    // Depth 47: orient1d ip[1] vs ip[4], col y — non-lifted
+    let d47 = p[1].y - p[4].y;
+    if d47 != 0.0 { return sos_apply(select(-1, 1, d47 > 0.0), sc, false); }
+
+    // Depth 48: orient1d ip[0] vs ip[4], col x — non-lifted
+    let d48 = p[0].x - p[4].x;
+    if d48 != 0.0 { return sos_apply(select(-1, 1, d48 > 0.0), sc, false); }
+
+    // Depth 49: always +1 (guaranteed non-zero terminal case)
+    return sos_apply(1, sc, false);
+}
+
+// Apply depth-based sign flip and swap parity
+fn sos_apply(orient: i32, swap_count: i32, negate: bool) -> i32 {
+    var r = orient;
+    if negate { r = -r; }
+    if (swap_count & 1) != 0 { r = -r; }
+    return r;
+}
+
 // --- Wrapper functions with SoS tie-breaking ---
 
 fn insphere_with_sos(
@@ -382,7 +784,7 @@ fn insphere_with_sos(
     );
 
     if result == 0 {
-        return sos_insphere_index(va, vb, vc, vd, ve);
+        return sos_insphere(va, vb, vc, vd, ve, a, b, c, d, e);
     }
 
     return result;
@@ -395,9 +797,12 @@ fn orient3d_with_sos(
     let result = orient3d_exact(a.x, a.y, a.z, b.x, b.y, b.z, c.x, c.y, c.z, d.x, d.y, d.z);
 
     if result == 0 {
-        return sos_orient3d_index(va, vb, vc, vd);
+        // Use proper Edelsbrunner-Mücke SoS perturbation (port of CUDA doOrient3DSoSOnly)
+        return sos_orient3d(va, vb, vc, vd, a, b, c, d);
     }
 
+    // CUDA: ortToOrient negates: det < 0 → OrientPos (+1), det > 0 → OrientNeg (-1)
+    // Our orient3d_exact returns Shewchuk sign directly (det < 0 → -1, det > 0 → +1)
     return result;
 }
 
@@ -505,12 +910,14 @@ fn check_delaunay_exact(
     // Do sphere check
     let bot_tet = tets[bot_ti_u];
 
-    // CRITICAL GUARD: Skip if tet contains infinity vertex
-    // CUDA: KerPredWrapper.h:812-853 - if (tet.has(_infIdx)) use special orient3d handling
-    // For now, skip entirely to prevent out-of-bounds access
-    if (bot_tet.x >= inf_idx) || (bot_tet.y >= inf_idx) || (bot_tet.z >= inf_idx) || (bot_tet.w >= inf_idx) {
-        return;  // Skip tets with infinity (boundary tets)
-    }
+    // Check if bot_tet is a boundary tet (contains infinity vertex)
+    // CUDA: doInSphereSoS handles boundary tets with orient3d fallback (KerPredWrapper.h:818-828)
+    var inf_vi: i32 = -1;
+    if bot_tet.x >= inf_idx { inf_vi = 0; }
+    else if bot_tet.y >= inf_idx { inf_vi = 1; }
+    else if bot_tet.z >= inf_idx { inf_vi = 2; }
+    else if bot_tet.w >= inf_idx { inf_vi = 3; }
+    let is_boundary = (inf_vi >= 0);
 
     let bot_p = array<vec3<f32>, 4>(
         points[bot_tet.x].xyz,
@@ -518,6 +925,17 @@ fn check_delaunay_exact(
         points[bot_tet.z].xyz,
         points[bot_tet.w].xyz,
     );
+
+    // For non-boundary tets: compute tet orientation for orientation-agnostic insphere check.
+    // For boundary tets: use tet_orient = 1 so the violation check (side * 1) > 0
+    // directly maps CUDA's sphToSide semantics (violation when raw orient3d > 0).
+    var tet_orient = 1;
+    if !is_boundary {
+        tet_orient = orient3d_with_sos(
+            bot_p[0], bot_p[1], bot_p[2], bot_p[3],
+            bot_tet.x, bot_tet.y, bot_tet.z, bot_tet.w
+        );
+    }
 
     var check_23 = 1u;
     var has_flip = false;
@@ -535,23 +953,42 @@ fn check_delaunay_exact(
         let top_vert = u32(top_vert_i);
         let top_p = points[top_vert].xyz;
 
-        // Use exact insphere with SoS
-        let side = insphere_with_sos(
-            bot_p[0], bot_p[1], bot_p[2], bot_p[3], top_p,
-            bot_tet.x, bot_tet.y, bot_tet.z, bot_tet.w, top_vert
-        );
+        var side: i32;
+        if is_boundary {
+            // CUDA boundary insphere fallback (KerPredWrapper.h:818-828):
+            // orient3d(pt[ord[0]], pt[ord[2]], pt[ord[1]], ptVert) with SoS
+            // sphToSide(ortToOrient(det)): violation when raw orient3d > 0
+            // With tet_orient = 1: (side * 1) > 0 triggers violation when side > 0
+            let inf_vi_u = u32(inf_vi);
+            let ord = TET_VI_AS_SEEN_FROM[inf_vi_u];
+            side = orient3d_with_sos(
+                bot_p[ord.x], bot_p[ord.z], bot_p[ord.y], top_p,
+                tet_vertex_val(bot_tet, ord.x), tet_vertex_val(bot_tet, ord.z),
+                tet_vertex_val(bot_tet, ord.y), top_vert
+            );
+        } else {
+            side = insphere_with_sos(
+                bot_p[0], bot_p[1], bot_p[2], bot_p[3], top_p,
+                bot_tet.x, bot_tet.y, bot_tet.z, bot_tet.w, top_vert
+            );
+        }
 
-        if side != 1 {
+        // Violation check: (side * tet_orient) > 0
+        // Non-boundary: tet_orient = orient3d sign; violation when insphere and orient agree
+        // Boundary: tet_orient = 1; violation when orient3d(ord[0],ord[2],ord[1],top) > 0
+        if (side * tet_orient) <= 0 {
             check_vi_local = check_vi_local >> 4u;
             continue; // No insphere failure
         }
 
         // We have insphere failure - set OPP_SPHERE_FAIL flag (CUDA: KerPredicates.cu:584)
+        atomicAdd(&counters[3], 1u); // DEBUG: count sphere failures
         let old_opp = atomicLoad(&tet_opp[bot_ti_u * 4u + bot_vi]);
         atomicOr(&tet_opp[bot_ti_u * 4u + bot_vi], OPP_SPHERE_FAIL);
 
         if bot_cor_ord_vi < 3u {
             // 3-2 flip confirmed
+            atomicAdd(&counters[4], 1u); // DEBUG: count 3-2 proposals
             let flip_info = make_flip(bot_vi, bot_cor_ord_vi);
             vote_arr[idx] = make_vote_val(bot_ti_u, flip_info);
 
@@ -602,16 +1039,24 @@ fn check_delaunay_exact(
             let vc = bot_tet[fv.z];
 
             // Use exact orient3d with SoS
-            let ort = orient3d_with_sos(p0, p1, p2, top_p, va, vb, vc, top_vert);
+            var ort = orient3d_with_sos(p0, p1, p2, top_p, va, vb, vc, top_vert);
+            // CUDA: doOrient3DSoS flips when v0/v1/v2 is infinity (KerPredWrapper.h:260-261)
+            if va >= inf_idx || vb >= inf_idx || vc >= inf_idx {
+                ort = -ort;
+            }
 
-            if ort != 1 {
+            // gDel3D convention: orient3d < 0 for correct orientation.
+            // CUDA: OrientPos (raw det < 0) required. Our -1 = raw det < 0.
+            if ort != -1 {
                 has_flip = false;
+                atomicAdd(&counters[6], 1u); // DEBUG: count 2-3 orient failures
                 break; // Cannot do 2-3 flip
             }
         }
 
         if has_flip {
             // 2-3 flip possible!
+            atomicAdd(&counters[5], 1u); // DEBUG: count 2-3 proposals
             let flip_info = make_flip(bot_vi, 3u);
             vote_arr[idx] = make_vote_val(bot_ti_u, flip_info);
             let top_ti = decode_opp_tet(bot_opp[bot_vi]);

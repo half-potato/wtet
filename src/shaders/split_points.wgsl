@@ -241,15 +241,25 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
     // Track how many have valid tet_idx
     atomicAdd(&counters[4], 1u); // scratch[2]
 
-    // Check if this tet is being split
-    let split_vert_position = tet_to_vert[tet_idx];
+    // Check if this tet was split.
+    // NOTE: split.wgsl runs BEFORE split_points and overwrites tet_to_vert[old_tet]
+    // with the base tet index (t0) of the 4 new tets. If INVALID, tet wasn't split.
+    let base_tet = tet_to_vert[tet_idx];
 
-    if (split_vert_position == INVALID) {
-        return; // Tet not being split, nothing to update
+    if (base_tet == INVALID) {
+        return; // Tet not split, nothing to update
     }
 
-    // Get vertex ID of the vertex being inserted (that's splitting this tet)
-    let split_vertex = uninserted[split_vert_position];
+    // Reconstruct original 5-vertex configuration from the new tet data.
+    // split.wgsl writes tets using TetViAsSeenFrom permutation:
+    //   t0 = base_tet+0: (v1, v3, v2, split_vertex)  — TetViAsSeenFrom[0] = {1,3,2}
+    //   t1 = base_tet+1: (v0, v2, v3, split_vertex)  — TetViAsSeenFrom[1] = {0,2,3}
+    //   t2 = base_tet+2: (v0, v3, v1, split_vertex)  — TetViAsSeenFrom[2] = {0,3,1}
+    //   t3 = base_tet+3: (v0, v1, v2, split_vertex)  — TetViAsSeenFrom[3] = {0,1,2}
+    let t0_data = tets[base_tet];
+    let t1_data = tets[base_tet + 1u];
+    // v0 = t1.x, v1 = t0.x, v2 = t0.z, v3 = t0.y, split = t0.w
+    let split_vertex = t0_data.w;
 
     // Get the actual vertex ID for this uninserted point
     let vertex = uninserted[vert_idx];
@@ -260,11 +270,9 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         return;
     }
 
-    // Load the original tet being split
-    let tet = tets[tet_idx];
-
-    // Build array of 5 vertices: 4 from original tet + 1 being inserted
-    var tet_verts = array<u32, 5>(tet.x, tet.y, tet.z, tet.w, split_vertex);
+    // Build array of 5 vertices: {v0, v1, v2, v3, split_vertex}
+    // Reconstruct from new tet data (see TetViAsSeenFrom above)
+    var tet_verts = array<u32, 5>(t1_data.x, t0_data.x, t0_data.z, t0_data.y, split_vertex);
 
     // Load points for all 5 vertices
     var pts = array<vec3<f32>, 5>(
@@ -298,25 +306,30 @@ fn main(@builtin(global_invocation_id) global_id: vec3<u32>) {
         );
 
         // Navigate to next face based on orientation
-        face = get_split_next(face, orient > 0);
+        // CRITICAL: CUDA uses ortToOrient which NEGATES Shewchuk sign:
+        //   det < 0 → OrientPos → SplitNext[face][0]
+        //   det > 0 → OrientNeg → SplitNext[face][1]
+        // Our orient3d returns Shewchuk sign directly, so orient < 0 = OrientPos.
+        // CUDA ref: KerPredicates.cu:269
+        //   face = SplitNext[face][(ort == OrientPos) ? 0 : 1];
+        face = get_split_next(face, orient < 0);
     }
 
     // After 3 iterations, face should be in range 7-10
-    // Map to actual tet index via free_arr
-    // The split operation allocates 4 tets from the split vertex's free list
-    // They are at positions: free_idx, free_idx-1, free_idx-2, free_idx-3
-    // where free_idx = (split_vertex + 1) * MEAN_VERTEX_DEGREE - 1 (top of stack)
+    // Map to actual new tet index.
+    //
+    // CUDA mapping (KerPredicates.cu:274):
+    //   face = freeArr._arr[ freeIdx - (face - 7) ];
+    //
+    // freeArr[freeIdx - (face-7)] = newTetIdx[face-7] = tet for vi = face-7
+    // Our deterministic allocation: vi=0 → base+0, vi=1 → base+1, etc.
+    // So: face=7 → vi=0 → base+0, face=10 → vi=3 → base+3
 
     if (face >= 7u && face <= 10u) {
-        let free_idx = (split_vertex + 1u) * MEAN_VERTEX_DEGREE - 1u;
-        let offset = face - 7u; // 0, 1, 2, or 3
-
-        // Bounds check
-        if (free_idx >= offset && free_idx - offset < arrayLength(&free_arr)) {
-            let new_tet = free_arr[free_idx - offset];
-            vert_tet[vert_idx] = new_tet;
-            // Increment counter to track updates
-            atomicAdd(&counters[6], 1u); // Use scratch[0] counter
-        }
+        let offset = face - 7u; // 7→0, 8→1, 9→2, 10→3
+        let new_tet = base_tet + offset;
+        vert_tet[vert_idx] = new_tet;
+        // Increment counter to track updates
+        atomicAdd(&counters[6], 1u); // Use scratch[0] counter
     }
 }

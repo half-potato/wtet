@@ -124,13 +124,15 @@ pub fn sign(x: f64) -> i32 {
 
 /// Orient4D with Simulation of Simplicity (SoS) tie-breaking.
 ///
-/// Determines the orientation of point `e` with respect to the hyperplane
-/// defined by points `a, b, c, d` in 4D (when lifted to paraboloid).
+/// Determines the orientation of point `e` with respect to the circumsphere
+/// of tetrahedron `(a, b, c, d)` using gDel3D's convention.
 ///
-/// Geometrically equivalent to the insphere test:
-/// - Returns positive if `e` is inside the circumsphere of `(a,b,c,d)`
-/// - Returns negative if `e` is outside
-/// - Returns zero only for exact degeneracies (which are broken by SoS)
+/// **gDel3D convention** (CommonTypes.h:95-103, PredWrapper.cpp:370-373):
+///   gDel3D's orientation is OPPOSITE of Shewchuk's. In gDel3D's convention,
+///   Shewchuk's insphere > 0 means the point is OUTSIDE the circumsphere.
+///   orient4d = sphToOrient(insphere) = sign(insphere):
+///   - OrientPos (+1) = point OUTSIDE circumsphere → no violation
+///   - OrientNeg (-1) = point INSIDE circumsphere → violation / beneath
 ///
 /// **Ported from:** gDel3D/CPU/PredWrapper.cpp doOrient4DAdaptSoS()
 ///
@@ -148,14 +150,21 @@ pub fn orient4d(
     d_idx: u32,
     e_idx: u32,
 ) -> i32 {
-    // Primary test: insphere (geometrically equivalent to orient4d)
+    // CUDA: sphToOrient(insphere(p0, p1, p2, p3, p4))
+    //   sphToOrient(det): det > 0 → OrientPos (+1), det < 0 → OrientNeg (-1)
+    //
+    // gDel3D convention (CommonTypes.h:114-117):
+    //   "Our orientation is defined opposite of Shewchuk"
+    //   "Shewchuk's insphere value will be +ve if point is *outside* sphere"
+    //
+    // Therefore: orient4d = sign(insphere)   (NOT -sign!)
     let sph = insphere(a, b, c, d, e);
 
     if sph > 0.0 {
-        return 1;
+        return 1; // Outside → OrientPos (no violation)
     }
     if sph < 0.0 {
-        return -1;
+        return -1; // Inside → OrientNeg (violation / beneath)
     }
 
     // Exact zero: use SoS tie-breaking based on lexicographic vertex ordering
@@ -163,19 +172,16 @@ pub fn orient4d(
     //
     // CUDA uses complex index permutation logic here. For simplicity,
     // we use a straightforward lexicographic comparison.
-    //
-    // The key insight: SoS ensures no two points are exactly cospherical
-    // by treating lower-index vertices as symbolically "perturbed downward".
 
     // Find the minimum index among the 5 points
     let min_idx = a_idx.min(b_idx).min(c_idx).min(d_idx).min(e_idx);
 
-    // If `e` has the minimum index, it's "below" (inside)
-    // Otherwise, it's "above" (outside)
+    // If `e` has the minimum index, it's "inside" → OrientNeg
+    // Otherwise, it's "outside" → OrientPos
     if e_idx == min_idx {
-        1 // Inside
+        -1 // Inside → OrientNeg
     } else {
-        -1 // Outside
+        1 // Outside → OrientPos
     }
 }
 

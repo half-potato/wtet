@@ -130,6 +130,11 @@ pub struct Pipelines {
     pub update_opp_pipeline: wgpu::ComputePipeline,
     pub update_opp_params: wgpu::Buffer,
 
+    // Pipeline: donate freed tets (post-flip: 3-2 freed tets → free list)
+    pub donate_freed_tets_pipeline: wgpu::ComputePipeline,
+    pub donate_freed_tets_bgl: wgpu::BindGroupLayout,
+    pub donate_freed_tets_params: wgpu::Buffer,
+
     // Pipeline: update flip trace (build flip history chains for relocateAll)
     pub update_flip_trace_pipeline: wgpu::ComputePipeline,
     pub update_flip_trace_params: wgpu::Buffer,
@@ -1058,6 +1063,36 @@ impl Pipelines {
             cache: None,
         });
 
+        // --- 12b. Donate freed tets (post-flip: return 3-2 freed tets to free list) ---
+        let donate_freed_tets_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("donate_freed_tets.wgsl"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("../shaders/donate_freed_tets.wgsl").into()),
+        });
+        let donate_freed_tets_params = GpuBuffers::create_params_buffer(device, [0, 0, 0, 0]);
+        let donate_freed_tets_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("donate_freed_tets_bgl"),
+            entries: &[
+                storage_ro_entry(0),  // flip_arr (read-only)
+                storage_rw_entry(1),  // free_arr (read-write)
+                storage_rw_entry(2),  // vert_free_arr (atomic)
+                storage_ro_entry(3),  // block_owner (read-only)
+                uniform_entry(4),     // params
+            ],
+        });
+        let donate_freed_tets_pl = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+            label: Some("donate_freed_tets_pl"),
+            bind_group_layouts: &[&donate_freed_tets_bgl],
+            immediate_size: 0,
+        });
+        let donate_freed_tets_pipeline = device.create_compute_pipeline(&wgpu::ComputePipelineDescriptor {
+            label: Some("donate_freed_tets"),
+            layout: Some(&donate_freed_tets_pl),
+            module: &donate_freed_tets_shader,
+            entry_point: Some("donate_freed_tets"),
+            compilation_options: Default::default(),
+            cache: None,
+        });
+
         // --- 13. Mark rejected flips (flip validation) ---
         let mark_rejected_flips_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("mark_rejected_flips.wgsl"),
@@ -1878,6 +1913,9 @@ impl Pipelines {
             relocate_points_fast_params,
             update_opp_pipeline,
             update_opp_params,
+            donate_freed_tets_pipeline,
+            donate_freed_tets_bgl,
+            donate_freed_tets_params,
             update_flip_trace_pipeline,
             update_flip_trace_params,
             update_flip_trace_bgl,

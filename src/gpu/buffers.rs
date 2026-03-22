@@ -215,13 +215,15 @@ impl GpuBuffers {
         eprintln!("[BUFFERS] free_arr: block-based allocation for {} vertex blocks ({} tets total)",
                   max_vertex_blocks, max_tets);
 
-        // Initialize vert_free_arr: per-vertex free slot counts
-        // Each vertex (including 4 super-tet vertices + 1 infinity) gets MEAN_VERTEX_DEGREE slots initially
+        // Initialize vert_free_arr: global atomic tet counter at index 0
+        // vert_free_arr[0] = next free tet index (starts at 5, after 5 init tets)
+        // Remaining entries unused (legacy per-vertex free list replaced by global counter)
         let num_vertices = (num_points + 5) as usize;
-        let mut vert_free_data = vec![MEAN_VERTEX_DEGREE; num_vertices];
+        let mut vert_free_data = vec![0u32; num_vertices];
+        vert_free_data[0] = 5; // First free tet after 5 init tets (0-4 used by init.wgsl)
 
-        eprintln!("[BUFFERS] vert_free_arr: num_vertices={}, each with {} slots",
-                  num_vertices, MEAN_VERTEX_DEGREE);
+        eprintln!("[BUFFERS] vert_free_arr: global counter, next_free_tet=5 (max_tets={})",
+                  max_tets);
 
         let free_arr = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("free_arr"),
@@ -665,6 +667,15 @@ impl GpuBuffers {
             usage: wgpu::BufferUsages::MAP_READ | wgpu::BufferUsages::COPY_DST,
             mapped_at_creation: false,
         });
+
+        // Safety: verify copy won't overrun source buffer
+        let buf_size = buffer.size();
+        if size > buf_size {
+            panic!(
+                "[read_buffer_as] Buffer overrun: need {} bytes ({} × {} elements) but buffer is only {} bytes",
+                size, elem_size, count, buf_size
+            );
+        }
 
         let mut encoder = device.create_command_encoder(&Default::default());
         encoder.copy_buffer_to_buffer(buffer, 0, &staging, 0, size);

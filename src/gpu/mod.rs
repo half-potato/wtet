@@ -32,6 +32,8 @@ pub struct GpuState {
     pub device: wgpu::Device,
     /// GPU timestamp period (nanoseconds per tick)
     pub timestamp_period: f32,
+    /// Next free tet index for global allocation (starts at 5 after init tets)
+    pub next_free_tet: u32,
     /// GPU profiler for timing GPU operations
     pub gpu_profiler: Option<GpuProfiler>,
     /// CPU profiler for timing CPU-side operations
@@ -97,11 +99,12 @@ impl GpuState {
         // Each vertex (including 4 super-tet + 1 infinity) gets MEAN_VERTEX_DEGREE slots
         // Plus MEAN_VERTEX_DEGREE slots for the infinity block (used during flips)
         let min_tets_for_blocks = (num_points + 5) * MEAN_VERTEX_DEGREE + MEAN_VERTEX_DEGREE;
-        // Also consider typical Delaunay tet count (~6.5x points) + overhead for retries
-        // CUDA allocates TetMax = pointNum × 8.5
-        // WGPU: use 8× to stay under 256 MB buffer allocation limit (at 2M points)
-        // 2M points × 8 × 16 bytes = 256 MB (exactly at limit)
-        let typical_tets = num_points * 8;
+        // Typical Delaunay tet count is ~6.5x points, but without tet recycling
+        // dead tets accumulate during construction. Each split creates 4 new tets
+        // and kills 1 (unrecycled). Each 2-3 flip creates 3 and kills 2 (net +1).
+        // Peak allocation ≈ 10-12× points. Use 12× for safety.
+        // CUDA allocates TetMax = pointNum × 8.5 but recycles dead tets.
+        let typical_tets = num_points * 12;
         let max_tets = min_tets_for_blocks.max(typical_tets).max(64);
 
         // Validate buffer sizes against WGPU limits
@@ -188,6 +191,7 @@ impl GpuState {
             max_tets,
             current_tet_num: 5, // Start with 5 (5-tet topology created by init kernel)
             num_uninserted,
+            next_free_tet: 5, // First free tet after 5 init tets (0-4 used by init.wgsl)
             vote_offset: max_tets, // Initialize to max (CUDA uses INT_MAX, we use max_tets)
             max_flips: max_tets / 2, // CUDA allocates TetMax/2 flip items
             use_partial_binding,
@@ -299,7 +303,10 @@ impl GpuState {
         }
 
         // Read failed verts and remap if needed
-        let failed_count = counters.failed_count as usize;
+        // Clamp to buffer capacity: gather_failed can report more violations than
+        // num_points (same vertex can violate multiple tet faces), but the buffer
+        // only holds num_points entries.
+        let failed_count = (counters.failed_count as usize).min(num_points as usize);
         let mut failed_verts = if failed_count > 0 {
             self.buffers
                 .read_failed_verts(device, queue, failed_count)

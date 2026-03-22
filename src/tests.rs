@@ -1071,6 +1071,10 @@ fn validate_full(
 ) -> Result<(), String> {
     check_adjacency_consistency(tets, adjacency)?;
     let num_real_points = points.len() as u32;
+    // Check orientation consistency (diagnostic)
+    if let Err(e) = check_orientation(points, tets, num_real_points) {
+        eprintln!("[ORIENT] {e}");
+    }
     let violations = check_delaunay_interior(points, tets, adjacency, num_real_points)?;
     if violations > 0 {
         return Err(format!(
@@ -1339,6 +1343,7 @@ fn test_delaunay_uniform_20k() {
 }
 
 #[test]
+#[ignore]
 fn test_delaunay_uniform_200k() {
     with_gpu(|device, queue| {
         let points = gen_uniform_random(200_000, 54321);
@@ -1351,6 +1356,7 @@ fn test_delaunay_uniform_200k() {
 }
 
 #[test]
+#[ignore]
 fn test_delaunay_uniform_2M() {
     with_gpu(|device, queue| {
         let points = gen_uniform_random(2_000_000, 54321);

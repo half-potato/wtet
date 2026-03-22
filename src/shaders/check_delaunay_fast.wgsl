@@ -60,15 +60,20 @@ fn is_opp_internal(opp: u32) -> bool {
     return (opp & 4u) != 0u;
 }
 
+// CUDA: makeNegative(v) = -(v + 2), escapes -1 sentinel (KerCommon.h:192-195)
 fn make_negative(val: i32) -> i32 {
-    return -val - 1;
+    return -(val + 2);
 }
 
 fn make_positive(val: i32) -> i32 {
-    if val >= 0 {
-        return val;
-    }
-    return -val - 1;
+    return -(val + 2);
+}
+
+fn tet_vertex_val(tet: vec4<u32>, i: u32) -> u32 {
+    if i == 0u { return tet.x; }
+    else if i == 1u { return tet.y; }
+    else if i == 2u { return tet.z; }
+    else { return tet.w; }
 }
 
 fn encode_opp(tet_idx: u32, vi: u32, special: bool, sphere_fail: bool) -> u32 {
@@ -257,12 +262,14 @@ fn check_delaunay_fast(
     // Do sphere check
     let bot_tet = tets[bot_ti_u];
 
-    // CRITICAL GUARD: Skip if tet contains infinity vertex
-    // CUDA: KerPredWrapper.h:812-853 - if (tet.has(_infIdx)) use special orient3d handling
-    // For now, skip entirely to prevent out-of-bounds access
-    if (bot_tet.x >= inf_idx) || (bot_tet.y >= inf_idx) || (bot_tet.z >= inf_idx) || (bot_tet.w >= inf_idx) {
-        return;  // Skip tets with infinity (boundary tets)
-    }
+    // Check if bot_tet is a boundary tet (contains infinity vertex)
+    // CUDA: doInSphereFast handles boundary tets with orient3d fallback (KerPredWrapper.h:789-796)
+    var inf_vi: i32 = -1;
+    if bot_tet.x >= inf_idx { inf_vi = 0; }
+    else if bot_tet.y >= inf_idx { inf_vi = 1; }
+    else if bot_tet.z >= inf_idx { inf_vi = 2; }
+    else if bot_tet.w >= inf_idx { inf_vi = 3; }
+    let is_boundary = (inf_vi >= 0);
 
     let bot_p = array<vec3<f32>, 4>(
         points[bot_tet.x].xyz,
@@ -270,6 +277,14 @@ fn check_delaunay_fast(
         points[bot_tet.z].xyz,
         points[bot_tet.w].xyz,
     );
+
+    // For non-boundary tets: compute tet orientation for orientation-agnostic insphere check.
+    // For boundary tets: use tet_orient = 1 so the violation check (side * 1) > 0
+    // directly maps CUDA's sphToSide semantics (violation when raw orient3d > 0).
+    var tet_orient = 1;
+    if !is_boundary {
+        tet_orient = orient3d_fast(bot_p[0], bot_p[1], bot_p[2], bot_p[3]);
+    }
 
     var check_23 = 1u;
     var has_flip = false;
@@ -287,14 +302,28 @@ fn check_delaunay_fast(
         let top_vert = u32(top_vert_i);
         let top_p = points[top_vert].xyz;
 
-        let side = insphere_fast(bot_p[0], bot_p[1], bot_p[2], bot_p[3], top_p);
+        var side: i32;
+        if is_boundary {
+            // CUDA boundary insphere fallback (KerPredWrapper.h:789-796):
+            // det = -orient3dFast(pt[ord[0]], pt[ord[2]], pt[ord[1]], ptVert)
+            // sphToSide(det): violation when det < 0, i.e., raw orient3d > 0
+            // With tet_orient = 1: (side * 1) > 0 triggers violation when side > 0
+            let inf_vi_u = u32(inf_vi);
+            let ord = TET_VI_AS_SEEN_FROM[inf_vi_u];
+            side = orient3d_fast(bot_p[ord.x], bot_p[ord.z], bot_p[ord.y], top_p);
+        } else {
+            side = insphere_fast(bot_p[0], bot_p[1], bot_p[2], bot_p[3], top_p);
+        }
 
         if side == 0 {
             // Mark as special for exact mode
             bot_opp[bot_vi] = bot_opp[bot_vi] | OPP_SPECIAL;
         }
 
-        if side != 1 {
+        // Violation check: (side * tet_orient) > 0
+        // Non-boundary: tet_orient = orient3d sign; violation when insphere and orient agree
+        // Boundary: tet_orient = 1; violation when orient3d(ord[0],ord[2],ord[1],top) > 0
+        if (side * tet_orient) <= 0 {
             check_vi_local = check_vi_local >> 4u;
             continue; // No insphere failure
         }
@@ -348,14 +377,23 @@ fn check_delaunay_fast(
             let p1 = bot_p[fv.y];
             let p2 = bot_p[fv.z];
 
-            let ort = orient3d_fast(p0, p1, p2, top_p);
+            var ort = orient3d_fast(p0, p1, p2, top_p);
+            // CUDA: doOrient3DFast flips when v0/v1/v2 is infinity (KerPredWrapper.h:97-98)
+            let v0 = bot_tet[fv.x];
+            let v1 = bot_tet[fv.y];
+            let v2 = bot_tet[fv.z];
+            if v0 >= inf_idx || v1 >= inf_idx || v2 >= inf_idx {
+                ort = -ort;
+            }
 
             if ort == 0 {
                 // Mark as special for exact mode
                 bot_opp[bot_vi] = bot_opp[bot_vi] | OPP_SPECIAL;
             }
 
-            if ort != 1 {
+            // gDel3D convention: new tets must have orient3d < 0.
+            // CUDA: OrientPos (raw det < 0) required. Our -1 = raw det < 0.
+            if ort != -1 {
                 has_flip = false;
                 break; // Cannot do 2-3 flip
             }

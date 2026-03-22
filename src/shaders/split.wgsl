@@ -90,30 +90,15 @@ fn set_opp_at(tet_idx: u32, face: u32, val: u32) {
     atomicStore(&tet_opp[tet_idx * 4u + face], val);
 }
 
-// Get 4 free tet slots
-// CRITICAL FIX: Atomically reserve slots BEFORE reading to prevent race condition
-// Race condition: If multiple threads split the same vertex simultaneously,
-// they would read the same positions from free_arr before atomicSub, getting
-// duplicate tet indices → corruption/degenerate tets!
-fn get_free_slots_4tet(vertex: u32) -> vec4<u32> {
-    // Atomically reserve 4 slots FIRST (returns old count BEFORE subtraction)
-    let old_count = atomicSub(&vert_free_arr[vertex], 4u);
-
-    // Calculate base index from the RESERVED position
-    // old_count is the number of free slots before our reservation
-    // We take slots at positions [old_count-1, old_count-2, old_count-3, old_count-4]
-    let base = vertex * MEAN_VERTEX_DEGREE;
-    let base_idx = base + old_count - 1u;
-
-    // Read from the reserved positions (now safe - no other thread can get these)
-    let slots = vec4<u32>(
-        free_arr[base_idx],
-        free_arr[base_idx - 1u],
-        free_arr[base_idx - 2u],
-        free_arr[base_idx - 3u]
-    );
-
-    return slots;
+// Allocate 4 consecutive tet slots deterministically based on insertion index.
+// Each insertion position `idx` gets tets at [base + idx*4, ..., base + idx*4 + 3]
+// where base = params.w (next_free_tet, provided by CPU).
+//
+// Deterministic allocation is REQUIRED so that split_points.wgsl (which runs
+// BEFORE split) can predict the new tet indices using the same formula.
+fn get_free_slots_4tet(idx: u32) -> vec4<u32> {
+    let base = params.w + idx * 4u;
+    return vec4<u32>(base, base + 1u, base + 2u, base + 3u);
 }
 
 @compute @workgroup_size(256)
@@ -158,9 +143,8 @@ fn split_tetra(
 
     // NOTE: Removed duplicate vertex check - CUDA has no such validation
 
-    // Allocate 4 new tet slots from vertex's pre-reserved block
-    // Uses CUDA's simple approach: read 4 consecutive slots from end of block
-    let new_slots = get_free_slots_4tet(vertex);
+    // Allocate 4 new tet slots deterministically based on insertion index
+    let new_slots = get_free_slots_4tet(idx);
     let t0 = new_slots.x;
     let t1 = new_slots.y;
     let t2 = new_slots.z;
@@ -261,29 +245,28 @@ fn split_tetra(
             var nei_face = decode_opp_face(ext_opp);
 
             // Check if neighbor is splitting concurrently
-            let nei_split_idx = tet_to_vert[nei_tet];
+            // tet_to_vert[nei_tet] is pre-written by CPU with the base tet index
+            // for all tets being split this iteration. INVALID = not being split.
+            let nei_base_tet = tet_to_vert[nei_tet];
 
-            if nei_split_idx != INVALID {
-                // Neighbor has split - use free_arr to find correct new tet
-                // CRITICAL: insert_list[].y is POSITION in uninserted array, NOT vertex ID.
-                // Must look up actual vertex via uninserted[] for free list formula.
-                // CUDA ref (KerDivision.cu:155): neiSplitVert = vertArr[neiSplitIdx]
-                let nei_split_pos = insert_list[nei_split_idx].y;
-                let nei_split_vert = uninserted[nei_split_pos];
-                let nei_free_idx = (nei_split_vert + 1u) * MEAN_VERTEX_DEGREE - 1u;
-
-                nei_tet = free_arr[nei_free_idx - nei_face];
+            if nei_base_tet != INVALID {
+                // Neighbor is being split concurrently.
+                // Its 4 new sub-tets are at [nei_base_tet, nei_base_tet+1, +2, +3].
+                // Sub-tet vi has face 3 = the external face that was original face vi.
+                // So the sub-tet we need is nei_base_tet + nei_face.
+                // CUDA ref: KerDivision.cu:155-159
+                nei_tet = nei_base_tet + nei_face;
                 nei_face = 3u;  // External faces become face 3 after split
+            } else {
+                // Neighbor is NOT split - update its incoming edge to point to us.
+                // CUDA ref: KerDivision.cu:150
+                // Only done for unsplit neighbors! If neighbor IS split, its own
+                // thread will set the incoming edge when it processes face 3.
+                set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], 3u));
             }
 
-            // ═════════════════════════════════════════════════════════════════════
-            // CRITICAL FIX: Set OUTGOING edge (this tet's face 3 → neighbor)
-            // ═════════════════════════════════════════════════════════════════════
-            // This was missing! Without it, face 3 points to old dead tets.
+            // Set OUTGOING edge (this tet's face 3 → neighbor or neighbor's sub-tet)
             set_opp_at(new_tets[k], 3u, encode_opp(nei_tet, nei_face));
-
-            // Set INCOMING edge (neighbor → this tet's face 3)
-            set_opp_at(nei_tet, nei_face, encode_opp(new_tets[k], 3u));
         } else {
             // No external neighbor (boundary face) - mark as invalid
             set_opp_at(new_tets[k], 3u, INVALID);
@@ -304,23 +287,24 @@ fn split_tetra(
     tet_to_vert[t2] = INVALID;
     tet_to_vert[t3] = INVALID;
 
+    // tet_to_vert[old_tet] already contains t0 (base tet), written by CPU
+    // before the split dispatch. split_points reads this to find the 4 new tets.
+    // No write needed here — the CPU-written value is correct and already visible.
+
     // ═══════════════════════════════════════════════════════════════════════════
-    // Donate old tet back to its owner's free list
+    // Mark old tet as dead (but do NOT donate back to free list)
     // ═══════════════════════════════════════════════════════════════════════════
-    // Port of CUDA KerDivision.cu:181-188 (AFTER all new tets are created)
+    // CUDA donates old tet to its block owner's free list (KerDivision.cu:181-188).
+    // However, in our WGPU port, donation races with allocation: concurrent
+    // atomicAdd (donation) and atomicSub (allocation) on vert_free_arr can
+    // interleave, causing the counter to overflow the block boundary. The
+    // allocation then reads tet indices from an adjacent block, which may be
+    // alive tets → corruption.
     //
-    // CUDA:
-    //   const int blkIdx  = tetIdx / MeanVertDegree;
-    //   const int vertIdx = ( blkIdx < insVertVec._num ) ? insVertVec._arr[ blkIdx ] : infIdx;
-    //   const int freeIdx = atomicAdd( &vertFreeArr[ vertIdx ], 1 );
-    //   freeArr[ vertIdx * MeanVertDegree + freeIdx ] = tetIdx;
-    //   setTetAliveState( tetInfoArr[ tetIdx ], false );
-    //
-    let blk_idx = old_tet / MEAN_VERTEX_DEGREE;
-    let owner_vertex = block_owner[blk_idx];
-    let free_slot_idx = atomicAdd(&vert_free_arr[owner_vertex], 1u);
-    free_arr[owner_vertex * MEAN_VERTEX_DEGREE + free_slot_idx] = old_tet;
-    tet_info[old_tet] = 0u;  // Mark as dead
+    // Fix: just mark dead. We pre-allocate (num_points+5)*8 tets, so each
+    // vertex has 4 spare slots after split. Flip allocation falls back to
+    // inf_idx pool if a vertex's local pool is exhausted.
+    tet_info[old_tet] = 0u;  // Mark as dead (slot is wasted, not recycled)
     // ═══════════════════════════════════════════════════════════════════════════
 
     breadcrumb(tid, CRUMB_AFTER_MARK_DEAD);

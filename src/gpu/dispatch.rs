@@ -239,11 +239,13 @@ impl GpuState {
         queue: &wgpu::Queue,
         num_uninserted: u32,
     ) {
-        // Write params with actual count after compaction (not buffer size!)
+        // Write params: x = num_uninserted, y = next_free_tet
+        // next_free_tet allows split_points to predict new tet indices using same formula as split
+        let next_free_tet = self.next_free_tet;
         queue.write_buffer(
             &self.pipelines.split_points_params,
             0,
-            bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]),
+            bytemuck::cast_slice(&[num_uninserted, next_free_tet, 0u32, 0u32]),
         );
 
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
@@ -335,14 +337,15 @@ impl GpuState {
         queue: &wgpu::Queue,
         num_insertions: u32,
     ) {
-        // params: x = num_insertions, y = inf_idx, z = current_tet_num
+        // params: x = num_insertions, y = inf_idx, z = current_tet_num, w = next_free_tet
         // inf_idx is at position num_points+4 (AFTER the 4 super-tet vertices)
         // Super-tet vertices are at [num_points, num_points+1, num_points+2, num_points+3]
         let inf_idx = self.num_points + 4;
         let current_tet_num = self.current_tet_num;
+        let next_free_tet = self.next_free_tet;
 
-        let params_data = [num_insertions, inf_idx, current_tet_num, 0u32];
-        eprintln!("[DISPATCH_SPLIT] Writing params: {:?}", params_data);
+        let params_data = [num_insertions, inf_idx, current_tet_num, next_free_tet];
+        eprintln!("[DISPATCH_SPLIT] Writing params: {:?} (next_free_tet={})", params_data, next_free_tet);
         queue.write_buffer(
             &self.pipelines.split_params,
             0,
@@ -769,7 +772,11 @@ impl GpuState {
         });
         pass.set_pipeline(&self.pipelines.reset_votes_pipeline);
         pass.set_bind_group(0, Some(&self.pipelines.reset_votes_bind_group), &[]);
-        pass.dispatch_workgroups(div_ceil(num_uninserted, 256), 1, 1);
+        // Must dispatch enough threads to cover BOTH max_tets (for tet_vote, tet_to_vert)
+        // AND num_uninserted (for vert_sphere). Using num_uninserted alone leaves
+        // high-indexed tet entries unreset, causing stale FLIP_NO_VOTE to block voting.
+        let reset_count = self.max_tets.max(num_uninserted);
+        pass.dispatch_workgroups(div_ceil(reset_count, 256), 1, 1);
     }
 
     /// Dispatch gather failed vertices.
@@ -1106,6 +1113,16 @@ impl GpuState {
         pass.dispatch_workgroups(div_ceil(tet_num, 256), 1, 1);
     }
 
+    /// Initialize tet_to_flip buffer to -1 on GPU.
+    /// Must be called before update_flip_trace to reset the flip chain state.
+    pub fn dispatch_init_tet_to_flip(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, max_tet_num: u32) {
+        queue.write_buffer(&self.pipelines.init_tet_to_flip_params, 0, bytemuck::cast_slice(&[max_tet_num, 0u32, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("init_tet_to_flip"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.init_tet_to_flip_pipeline);
+        pass.set_bind_group(0, Some(&self.pipelines.init_tet_to_flip_bind_group), &[]);
+        pass.dispatch_workgroups(div_ceil(max_tet_num, 256), 1, 1);
+    }
+
     /// Dispatch update_flip_trace to build flip history chains.
     /// Port of kerUpdateFlipTrace from KerDivision.cu:742-782
     pub fn dispatch_update_flip_trace(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
@@ -1242,6 +1259,48 @@ impl GpuState {
                 wgpu::BindGroupEntry {
                     binding: 4,
                     resource: self.pipelines.update_opp_params.as_entire_binding(),
+                },
+            ],
+        });
+        pass.set_bind_group(0, Some(&bind_group), &[]);
+
+        pass.dispatch_workgroups(div_ceil(flip_num, 256), 1, 1);
+    }
+
+    /// Dispatch donate_freed_tets: post-flip pass that returns 3-2 freed tets to the free list.
+    /// Must run AFTER flip kernel and update_opp, BEFORE the next flip iteration.
+    /// This prevents within-batch races where a 3-2 donation is immediately consumed by a 2-3 allocation.
+    pub fn dispatch_donate_freed_tets(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, org_flip_num: u32, flip_num: u32) {
+        if flip_num == 0 {
+            return;
+        }
+        queue.write_buffer(&self.pipelines.donate_freed_tets_params, 0, bytemuck::cast_slice(&[org_flip_num, flip_num, 0u32, 0u32]));
+        let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("donate_freed_tets"), timestamp_writes: None });
+        pass.set_pipeline(&self.pipelines.donate_freed_tets_pipeline);
+
+        let bind_group = self.device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("donate_freed_tets_bg_dynamic"),
+            layout: &self.pipelines.donate_freed_tets_bgl,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: self.buffers.flip_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: self.buffers.free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: self.buffers.vert_free_arr.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 3,
+                    resource: self.buffers.block_owner.as_entire_binding(),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 4,
+                    resource: self.pipelines.donate_freed_tets_params.as_entire_binding(),
                 },
             ],
         });
@@ -1854,7 +1913,8 @@ impl GpuState {
     /// Dispatch relocate points fast.
     /// total_flips: Total number of accumulated flips (for partial binding of flip_arr)
     pub fn dispatch_relocate_points_fast(&self, encoder: &mut wgpu::CommandEncoder, queue: &wgpu::Queue, num_uninserted: u32, total_flips: u32) {
-        queue.write_buffer(&self.pipelines.relocate_points_fast_params, 0, bytemuck::cast_slice(&[num_uninserted, 0u32, 0u32, 0u32]));
+        let inf_idx = self.num_points + 4;
+        queue.write_buffer(&self.pipelines.relocate_points_fast_params, 0, bytemuck::cast_slice(&[num_uninserted, inf_idx, 0u32, 0u32]));
         let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor { label: Some("relocate_points_fast"), timestamp_writes: None });
         pass.set_pipeline(&self.pipelines.relocate_points_fast_pipeline);
 

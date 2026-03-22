@@ -89,20 +89,41 @@ fn make_first_tetra() {
     let n = params.x;
 
     // Virtual vertices: n, n+1, n+2, n+3 (super-tet), n+4 (infinity)
-    let v0 = n;
-    let v1 = n + 1u;
+    var sv0 = n;
+    var sv1 = n + 1u;
     let v2 = n + 2u;
     let v3 = n + 3u;
     let inf_idx = n + 4u;
 
+    // Orient3d check — swap v0,v1 if negative to ensure positive orientation.
+    // CUDA: GpuDelaunay.cu:284-293
+    //   RealType ori = orient3dzero(p0, p1, p2, p3);
+    //   if (ortToOrient(ori) == OrientNeg) std::swap(v0, v1);
+    let p0 = points[sv0].xyz;
+    let p1 = points[sv1].xyz;
+    let p2 = points[v2].xyz;
+    let p3 = points[v3].xyz;
+    let ad = p0 - p3; let bd = p1 - p3; let cd = p2 - p3;
+    let orient = ad.x * (bd.y * cd.z - bd.z * cd.y)
+               + bd.x * (cd.y * ad.z - cd.z * ad.y)
+               + cd.x * (ad.y * bd.z - ad.z * bd.y);
+    // CUDA (GpuDelaunay.cu:292): swaps when ortToOrient(ori) == OrientNeg
+    // ortToOrient negates Shewchuk sign: det > 0 → OrientNeg
+    // So swap when Shewchuk orient3d > 0, ensuring orient3d < 0 after swap.
+    // For orient3d < 0: insphere < 0 = inside circumsphere = violation.
+    if orient > 0.0 {
+        let tmp = sv0;
+        sv0 = sv1;
+        sv1 = tmp;
+    }
+
     // Create 5 tets matching CUDA's kerMakeFirstTetra (KerDivision.cu:46-95)
-    // Note: CUDA uses (v0,v1,v2,v3) but current WGSL swaps to (v0,v1,v3,v2) for positive orientation
-    // Following CUDA exactly here - may need orientation adjustment if tests fail
-    tets[0] = vec4<u32>(v0, v1, v2, v3);         // Base tet
-    tets[1] = vec4<u32>(v1, v2, v3, inf_idx);    // Boundary face 0
-    tets[2] = vec4<u32>(v0, v3, v2, inf_idx);    // Boundary face 1
-    tets[3] = vec4<u32>(v0, v1, v3, inf_idx);    // Boundary face 2
-    tets[4] = vec4<u32>(v0, v2, v1, inf_idx);    // Boundary face 3
+    // Uses (potentially swapped) sv0, sv1 to ensure positive orient3d.
+    tets[0] = vec4<u32>(sv0, sv1, v2, v3);         // Base tet
+    tets[1] = vec4<u32>(sv1, v2, v3, inf_idx);     // Boundary face 0
+    tets[2] = vec4<u32>(sv0, v3, v2, inf_idx);     // Boundary face 1
+    tets[3] = vec4<u32>(sv0, sv1, v3, inf_idx);    // Boundary face 2
+    tets[4] = vec4<u32>(sv0, v2, sv1, inf_idx);    // Boundary face 3
 
     // Set adjacency for all 5 tets
     for (var t = 0u; t < 5u; t++) {

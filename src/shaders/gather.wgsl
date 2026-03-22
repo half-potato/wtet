@@ -135,17 +135,17 @@ fn gather_failed(
 
         let pe = points[opposite_vert].xyz;
 
-        // Perform insphere test: positive result = violation
-        let insph = select(
-            -insphere_simple(p0, p2, p1, p3, pe),
-            insphere_simple(p0, p1, p2, p3, pe),
-            orient > 0.0
-        );
+        // Insphere test — orient3d-aware (Shewchuk convention).
+        // Violation = point inside circumsphere = insphere * orient > 0.
+        // Works correctly regardless of tet orientation.
+        let insph = insphere_simple(p0, p1, p2, p3, pe);
 
-        if insph > 0.0 {
+        if (insph * orient > 0.0) {
             // Delaunay violation! Mark the opposite vertex as failed.
             let slot = atomicAdd(&counters[COUNTER_FAILED], 1u);
-            failed_verts[slot] = opposite_vert;
+            if slot < num_points {
+                failed_verts[slot] = opposite_vert;
+            }
         }
     }
 }

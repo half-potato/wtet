@@ -111,23 +111,39 @@ impl Star {
         let cor_vi = (vi + 1) % 3;
         let opp = self.tri_opp_vec[tri_idx];
         let tri = self.tri_vec[tri_idx];
+        let len = self.tri_opp_vec.len();
 
+        // Guard: all adjacencies must be valid
+        if opp.t[vi] == crate::types::INVALID || opp.t[cor_vi] == crate::types::INVALID {
+            return;
+        }
         let opp_tri = opp.get_opp_tri(vi) as usize;
         let opp_vi = opp.get_opp_vi(vi) as usize;
         let side_tri = opp.get_opp_tri(cor_vi) as usize;
         let side_vi = opp.get_opp_vi(cor_vi) as usize;
+        if opp_tri >= len || side_tri >= len { return; }
         let opp_vert = self.tri_vec[opp_tri].v[opp_vi];
+
+        // Build new adjacency — check all sources are valid
+        let opp_v0 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 1) % 3);
+        let opp_v1 = self.tri_opp_vec[side_tri].get_opp_tri_vi((side_vi + 2) % 3);
+        let opp_v2 = opp.get_opp_tri_vi((vi + 2) % 3);
+        if opp_v0 == crate::types::INVALID || opp_v1 == crate::types::INVALID
+            || opp_v2 == crate::types::INVALID
+        {
+            return;
+        }
+        if self.get_opp_tri(opp_v0) >= len || self.get_opp_tri(opp_v1) >= len
+            || self.get_opp_tri(opp_v2) >= len
+        {
+            return;
+        }
 
         // Create new triangle
         let new_tri = Tri::new(tri.v[vi], tri.v[cor_vi], opp_vert);
 
         self.tri_vec[tri_idx] = new_tri;
         self.tet_idx_vec[tri_idx] = -1;
-
-        // Build new adjacency
-        let opp_v0 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 1) % 3);
-        let opp_v1 = self.tri_opp_vec[side_tri].get_opp_tri_vi((side_vi + 2) % 3);
-        let opp_v2 = opp.get_opp_tri_vi((vi + 2) % 3);
 
         let mut new_opp = TriOpp::new();
         new_opp.t[0] = opp_v0;
@@ -176,12 +192,32 @@ impl Star {
     /// - `vi`: Local index of edge to flip
     /// - `stack`: Work stack for recursive flipping
     pub fn flip22(&mut self, tri_idx: usize, vi: usize, stack: &mut Vec<u32>) {
+        // Re-read live adjacency (snapshot from do_flipping may be stale after prior flips)
         let opp = self.tri_opp_vec[tri_idx];
         let tri = self.tri_vec[tri_idx];
 
+        if opp.t[vi] == crate::types::INVALID { return; }
         let opp_tri = opp.get_opp_tri(vi) as usize;
+        if opp_tri >= self.tri_vec.len() { return; }
         let opp_vi = opp.get_opp_vi(vi) as usize;
         let opp_vert = self.tri_vec[opp_tri].v[opp_vi];
+
+        // Guard: all 4 surrounding adjacencies must be valid for back-pointer updates
+        let opp_v0 = opp.get_opp_tri_vi((vi + 2) % 3);
+        let opp_v1 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 1) % 3);
+        let opp_v2 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 2) % 3);
+        let opp_v3 = opp.get_opp_tri_vi((vi + 1) % 3);
+        let len = self.tri_opp_vec.len();
+        if opp_v0 == crate::types::INVALID || opp_v1 == crate::types::INVALID
+            || opp_v2 == crate::types::INVALID || opp_v3 == crate::types::INVALID
+        {
+            return;
+        }
+        if self.get_opp_tri(opp_v0) >= len || self.get_opp_tri(opp_v1) >= len
+            || self.get_opp_tri(opp_v2) >= len || self.get_opp_tri(opp_v3) >= len
+        {
+            return;
+        }
 
         // Create two new triangles
         let new_tri0 = Tri::new(tri.v[vi], opp_vert, tri.v[(vi + 2) % 3]);
@@ -194,11 +230,6 @@ impl Star {
         self.tet_idx_vec[opp_tri] = -1;
 
         // Build new adjacency
-        let opp_v0 = opp.get_opp_tri_vi((vi + 2) % 3);
-        let opp_v1 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 1) % 3);
-        let opp_v2 = self.tri_opp_vec[opp_tri].get_opp_tri_vi((opp_vi + 2) % 3);
-        let opp_v3 = opp.get_opp_tri_vi((vi + 1) % 3);
-
         let mut new_opp0 = TriOpp::new();
         new_opp0.t[0] = opp_v2;
         new_opp0.t[1] = opp_v3;
@@ -442,6 +473,9 @@ impl Star {
             }
 
             // Check 2-2 flippability using orient3d
+            // CUDA: OrientNeg == doOrient3DSoS(...) means Shewchuk orient3d > 0
+            // (ortToOrient inverts: det > 0 → OrientNeg)
+            // So "can't flip" when Shewchuk orient3d > 0.
             let or1 = predicates::orient3d(
                 self.points[tri.v[vi] as usize],
                 self.points[tri.v[(vi + 1) % 3] as usize],
@@ -449,7 +483,7 @@ impl Star {
                 self.points[self.vert as usize],
             );
 
-            if or1 < 0.0 {
+            if or1 > 0.0 {
                 if ort < 0 && is_non_extreme[tri.v[(vi + 1) % 3] as usize] != visit_id {
                     is_non_extreme[tri.v[(vi + 1) % 3] as usize] = visit_id;
                     self.push_fan_to_stack(tri_idx, (vi + 2) % 3, &mut stack);
@@ -464,7 +498,7 @@ impl Star {
                 self.points[self.vert as usize],
             );
 
-            if or2 < 0.0 {
+            if or2 > 0.0 {
                 if ort < 0 && is_non_extreme[tri.v[(vi + 2) % 3] as usize] != visit_id {
                     is_non_extreme[tri.v[(vi + 2) % 3] as usize] = visit_id;
                     self.push_fan_to_stack(tri_idx, vi, &mut stack);
@@ -510,6 +544,9 @@ impl Star {
     /// Locate a triangle containing the vertex (walk from arbitrary start).
     ///
     /// Ported from Star.cpp lines 758-806
+    ///
+    /// If the walk hits a boundary (INVALID adjacency), falls back to
+    /// linear scan of all triangles.
     fn locate_vert(&self, in_vert: u32) -> Option<usize> {
         // Find first non-free triangle
         let mut tri_idx = 0;
@@ -526,8 +563,15 @@ impl Star {
 
         let mut prev_vi = None;
 
-        // Walk to containing triangle
+        // Walk to containing triangle (CUDA: Star.cpp:774-803)
+        let max_steps = self.tri_vec.len() * 3;
+        let mut step = 0;
         loop {
+            step += 1;
+            if step > max_steps || tri_idx >= self.tri_vec.len() {
+                break; // Walk didn't converge — fall back to linear scan
+            }
+
             let tri = self.tri_vec[tri_idx];
 
             // Check 3 sides
@@ -557,12 +601,45 @@ impl Star {
             }
 
             let opp = self.tri_opp_vec[tri_idx];
+            // Check for INVALID adjacency (boundary of star)
+            if opp.t[vi] == crate::types::INVALID {
+                break; // Hit star boundary — fall back to linear scan
+            }
             let opp_ti = opp.get_opp_tri(vi) as usize;
+            if opp_ti >= self.tri_vec.len() {
+                break; // Out of bounds — fall back to linear scan
+            }
             let opp_vi = opp.get_opp_vi(vi) as usize;
 
             tri_idx = opp_ti;
             prev_vi = Some(opp_vi);
         }
+
+        // Fallback: linear scan of all non-free triangles.
+        // Test each triangle to see if in_vert is "inside" (all orient3d >= 0).
+        for ti in 0..self.tri_vec.len() {
+            if self.tri_status_vec[ti] == TriStatus::Free {
+                continue;
+            }
+            let tri = self.tri_vec[ti];
+            let mut inside = true;
+            for vi in 0..3 {
+                let ori = predicates::orient3d(
+                    self.points[tri.v[(vi + 1) % 3] as usize],
+                    self.points[tri.v[(vi + 2) % 3] as usize],
+                    self.points[in_vert as usize],
+                    self.points[self.vert as usize],
+                );
+                if ori < 0.0 {
+                    inside = false;
+                    break;
+                }
+            }
+            if inside {
+                return Some(ti);
+            }
+        }
+        None
     }
 
     /// Mark triangles "beneath" the new vertex and find one to use as hole base.
@@ -612,7 +689,14 @@ impl Star {
                 for vi in 0..3 {
                     self.check_vert_deleted(tri_idx, vi);
 
+                    // Guard against INVALID adjacency (star boundary)
+                    if opp.t[vi] == crate::types::INVALID {
+                        continue;
+                    }
                     let opp_tri = opp.get_opp_tri(vi) as usize;
+                    if opp_tri >= visited.len() {
+                        continue;
+                    }
 
                     if visited[opp_tri] != visit_id {
                         stack.push(opp_tri);
@@ -637,7 +721,14 @@ impl Star {
         // Rotate around vertex
         while self.tri_status_vec[cur_tri_idx] == TriStatus::Free {
             let cur_tri_opp = self.tri_opp_vec[cur_tri_idx];
+            // Guard against INVALID adjacency (star boundary)
+            if cur_tri_opp.t[(cur_vi + 2) % 3] == crate::types::INVALID {
+                break;
+            }
             let opp_tri_idx = cur_tri_opp.get_opp_tri((cur_vi + 2) % 3) as usize;
+            if opp_tri_idx >= self.tri_vec.len() {
+                break;
+            }
 
             cur_vi = cur_tri_opp.get_opp_vi((cur_vi + 2) % 3) as usize;
             cur_tri_idx = opp_tri_idx;
@@ -664,7 +755,13 @@ impl Star {
         let tri_opp_first = self.tri_opp_vec[ben_tri_idx];
 
         for vi in 0..3 {
+            if tri_opp_first.t[vi] == crate::types::INVALID {
+                continue;
+            }
             let opp_tri_idx = tri_opp_first.get_opp_tri(vi) as usize;
+            if opp_tri_idx >= self.tri_status_vec.len() {
+                continue;
+            }
 
             if self.tri_status_vec[opp_tri_idx] != TriStatus::Free {
                 let first_tri_idx = opp_tri_idx;
@@ -684,7 +781,13 @@ impl Star {
             let tri_opp = self.tri_opp_vec[tri_idx];
 
             for vi in 0..3 {
+                if tri_opp.t[vi] == crate::types::INVALID {
+                    continue;
+                }
                 let tri_opp_idx = tri_opp.get_opp_tri(vi) as usize;
+                if tri_opp_idx >= self.tri_status_vec.len() {
+                    continue;
+                }
 
                 if self.tri_status_vec[tri_opp_idx] == TriStatus::Free {
                     return Some((tri_idx, vi, tri_opp_idx));
@@ -732,91 +835,132 @@ impl Star {
     /// Stitch new vertex to the hole created by marking beneath triangles.
     ///
     /// Ported from Star.cpp lines 553-672
-    fn stitch_vert_to_hole(&mut self, ins_vert: u32, ben_tri_idx: usize) {
-        let (first_tri_idx, first_vi, _first_hole_tri_idx) =
-            self.find_first_hole_segment(ben_tri_idx).expect("No hole segment found");
+    /// Returns false if no hole segment found (all triangles marked beneath).
+    fn stitch_vert_to_hole(&mut self, ins_vert: u32, ben_tri_idx: usize) -> bool {
+        let (first_tri_idx, first_vi, first_hole_tri_idx) =
+            match self.find_first_hole_segment(ben_tri_idx) {
+                Some(seg) => seg,
+                None => return false, // All triangles marked beneath — can't stitch
+            };
 
         // Get first two vertices of hole
-        let cur_tri_idx = first_tri_idx;
+        // CUDA: Star.cpp:568-572
+        let mut cur_tri_idx = first_tri_idx;
         let cur_tri = self.tri_vec[cur_tri_idx];
         let first_vert = cur_tri.v[(first_vi + 1) % 3];
         let mut cur_vi = (first_vi + 2) % 3;
         let mut cur_vert = cur_tri.v[cur_vi];
 
         // Stitch first triangle
-        let mut free_tri_idx = 0;
-        let first_new_tri_idx = self.get_free_tri(&mut free_tri_idx);
+        // CUDA: Star.cpp:576-588
+        // CUDA reuses firstHoleTriIdx directly; we do the same
+        let first_new_tri_idx = first_hole_tri_idx;
 
-        let new_tri = Tri::new(ins_vert, first_vert, cur_vert);
+        // CUDA vertex order: { insVert, curVert, firstVert }
+        let first_new_tri = Tri::new(ins_vert, cur_vert, first_vert);
 
-        self.tri_vec[first_new_tri_idx] = new_tri;
+        self.tri_vec[first_new_tri_idx] = first_new_tri;
         self.tet_idx_vec[first_new_tri_idx] = -1;
         self.tri_status_vec[first_new_tri_idx] = TriStatus::New;
 
-        // Set adjacency with opposite triangle
-        self.tri_opp_vec[cur_tri_idx].set_opp(cur_vi, first_new_tri_idx as u32, 0);
-        self.tri_opp_vec[first_new_tri_idx].set_opp(0, cur_tri_idx as u32, cur_vi as u32);
+        self.add_one_tri_to_queue(first_new_tri_idx, &first_new_tri);
 
-        self.add_one_tri_to_queue(first_new_tri_idx, &new_tri);
+        // Adjacency: firstNewTri face 0 ↔ firstTriIdx face firstVi
+        // CUDA: Star.cpp:584-588
+        self.tri_opp_vec[first_new_tri_idx].set_opp(0, first_tri_idx as u32, first_vi as u32);
+        self.tri_opp_vec[first_tri_idx].set_opp(first_vi, first_new_tri_idx as u32, 0);
 
+        let mut free_tri_idx = 0;
         let mut prev_new_tri_idx = first_new_tri_idx;
 
-        // Stitch remaining triangles
-        loop {
-            // Move to next edge
-            let opp = self.tri_opp_vec[cur_tri_idx];
-            let next_tri_idx = opp.get_opp_tri((cur_vi + 1) % 3) as usize;
-            let opp_vi = opp.get_opp_vi((cur_vi + 1) % 3) as usize;
-
-            // Find next vertex
-            let next_tri = self.tri_vec[next_tri_idx];
-            let next_vert = next_tri.v[(opp_vi + 2) % 3];
-
-            if next_vert == first_vert {
-                break; // Completed the hole
-            }
-
-            // Create new triangle
-            let new_tri_idx = self.get_free_tri(&mut free_tri_idx);
-            let new_tri = Tri::new(ins_vert, cur_vert, next_vert);
-
-            // Adjacency with opposite triangle
-            self.tri_opp_vec[next_tri_idx].set_opp(opp_vi, new_tri_idx as u32, 0);
-            self.tri_opp_vec[new_tri_idx].set_opp(0, next_tri_idx as u32, opp_vi as u32);
-
-            // Adjacency with previous new triangle
-            self.tri_opp_vec[prev_new_tri_idx].set_opp(2, new_tri_idx as u32, 1);
-            self.tri_opp_vec[new_tri_idx].set_opp(1, prev_new_tri_idx as u32, 2);
-
-            // Last triangle: close the loop
-            if next_vert == first_vert {
-                self.tri_opp_vec[first_new_tri_idx].set_opp(1, new_tri_idx as u32, 2);
-                self.tri_opp_vec[new_tri_idx].set_opp(2, first_new_tri_idx as u32, 1);
-            }
-
-            // Store new triangle
-            self.tri_vec[new_tri_idx] = new_tri;
-            self.tet_idx_vec[new_tri_idx] = -1;
-            self.tri_status_vec[new_tri_idx] = TriStatus::New;
-
-            self.add_one_tri_to_queue(new_tri_idx, &new_tri);
-
-            prev_new_tri_idx = new_tri_idx;
-            cur_vi = (opp_vi + 1) % 3;
-            cur_vert = next_vert;
-
-            // Safety check
-            if self.tri_vec.len() > 10000 {
-                eprintln!("WARNING: Star growing too large, stopping stitching");
+        // Walk around outside of hole in CW direction, stitching triangles
+        // CUDA: Star.cpp:597-667
+        let max_iters = self.tri_vec.len() * 3; // Safety limit
+        let mut iters = 0;
+        while cur_vert != first_vert {
+            iters += 1;
+            if iters > max_iters {
                 break;
+            }
+
+            // Check opposite triangle in CW direction: (curVi + 2) % 3
+            // CUDA: Star.cpp:600-601
+            let walk_vi = (cur_vi + 2) % 3;
+            let cur_tri_opp = self.tri_opp_vec[cur_tri_idx];
+            if cur_tri_opp.t[walk_vi] == crate::types::INVALID {
+                break; // Hit star boundary
+            }
+            let glo_opp_tri_idx = cur_tri_opp.get_opp_tri(walk_vi) as usize;
+            if glo_opp_tri_idx >= self.tri_status_vec.len() {
+                break;
+            }
+            let status = self.tri_status_vec[glo_opp_tri_idx];
+
+            // CUDA: Star.cpp:607-613 — Tri is outside the hole (not Free, not New)
+            if status != TriStatus::Free && status != TriStatus::New {
+                // Continue walking around the border
+                let opp_vi = cur_tri_opp.get_opp_vi(walk_vi) as usize;
+                cur_vi = (opp_vi + 2) % 3;
+                cur_tri_idx = glo_opp_tri_idx;
+            } else {
+                // CUDA: Star.cpp:617-666 — Tri is in hole, create new triangle
+                let new_tri_idx = if status == TriStatus::Free {
+                    glo_opp_tri_idx // Reuse hole triangle slot
+                } else {
+                    self.get_free_tri(&mut free_tri_idx)
+                };
+
+                // Get next vertex in hole boundary
+                // CUDA: Star.cpp:623-625
+                let opp_vi = (cur_vi + 2) % 3;
+                let cur_tri_data = self.tri_vec[cur_tri_idx];
+                let next_vert = cur_tri_data.v[(cur_vi + 1) % 3];
+
+                // CUDA vertex order: { insVert, nextVert, curVert }
+                let new_tri = Tri::new(ins_vert, next_vert, cur_vert);
+
+                // Adjacency with opposite (border) triangle
+                // CUDA: Star.cpp:632-636
+                self.tri_opp_vec[cur_tri_idx].set_opp(opp_vi, new_tri_idx as u32, 0);
+                self.tri_opp_vec[new_tri_idx].set_opp(0, cur_tri_idx as u32, opp_vi as u32);
+
+                // Adjacency with previous new triangle
+                // CUDA: Star.cpp:640-642
+                self.tri_opp_vec[prev_new_tri_idx].set_opp(2, new_tri_idx as u32, 1);
+                self.tri_opp_vec[new_tri_idx].set_opp(1, prev_new_tri_idx as u32, 2);
+
+                // Last hole triangle: close the loop
+                // CUDA: Star.cpp:645-650
+                if next_vert == first_vert {
+                    self.tri_opp_vec[first_new_tri_idx].set_opp(1, new_tri_idx as u32, 2);
+                    self.tri_opp_vec[new_tri_idx].set_opp(2, first_new_tri_idx as u32, 1);
+                }
+
+                // Store new triangle data
+                self.tri_vec[new_tri_idx] = new_tri;
+                self.tet_idx_vec[new_tri_idx] = -1;
+                self.tri_status_vec[new_tri_idx] = TriStatus::New;
+
+                self.add_one_tri_to_queue(new_tri_idx, &new_tri);
+
+                // Advance
+                prev_new_tri_idx = new_tri_idx;
+                cur_vi = (cur_vi + 1) % 3;
+                cur_vert = next_vert;
             }
         }
 
-        // Close the loop with first triangle
-        self.tri_opp_vec[first_new_tri_idx].set_opp(1, prev_new_tri_idx as u32, 2);
-        self.tri_opp_vec[prev_new_tri_idx].set_opp(2, first_new_tri_idx as u32, 1);
+        // If loop didn't close naturally (boundary case), close it now
+        if cur_vert == first_vert && prev_new_tri_idx != first_new_tri_idx {
+            // Already closed in the loop's last-hole-triangle check
+        } else if cur_vert != first_vert {
+            // Incomplete hole walk (boundary star) — close what we have
+            self.tri_opp_vec[first_new_tri_idx].set_opp(1, prev_new_tri_idx as u32, 2);
+            self.tri_opp_vec[prev_new_tri_idx].set_opp(2, first_new_tri_idx as u32, 1);
+        }
 
         self.change_new_to_valid();
+        true
     }
 
     /// Insert new vertex into star's link.
@@ -829,24 +973,45 @@ impl Star {
         visited: &mut Vec<i32>,
         visit_id: i32,
     ) -> bool {
+        // Guard: never insert center vertex into own star
+        if ins_vert == self.vert {
+            return true;
+        }
+
+        // Save state: mark_beneath_triangles destructively sets triangles to Free.
+        // If stitch_vert_to_hole then fails, the star is corrupted.
+        // We must restore to prevent cascade failures.
+        let saved_status = self.tri_status_vec.clone();
+        let saved_tet_idx = self.tet_idx_vec.clone();
+
         let ben_tri_idx = match self.mark_beneath_triangles(ins_vert, stack, visited, visit_id) {
             Some(idx) => idx,
-            None => return false,
+            None => {
+                // Restore: mark_beneath may have partially marked Free
+                self.tri_status_vec = saved_status;
+                self.tet_idx_vec = saved_tet_idx;
+                return false;
+            }
         };
 
-        self.stitch_vert_to_hole(ins_vert, ben_tri_idx);
-
+        if !self.stitch_vert_to_hole(ins_vert, ben_tri_idx) {
+            // Restore: stitch failed, star has corrupted state
+            self.tri_status_vec = saved_status;
+            self.tet_idx_vec = saved_tet_idx;
+            return false;
+        }
         true
     }
 
     /// Get proof vertices for failed insertion (orient4d-based).
     ///
-    /// Ported from Star.cpp lines 674-750
+    /// Ported from Star.cpp lines 674-740
     ///
     /// Returns 4 vertices that form a "proof" explaining why insertion failed.
-    /// Uses orient4d tests to find a planar configuration.
+    /// Uses orient4d to find a triangle intersected by the plane
+    /// (starVert, inVert, exVert, planeVert).
     pub fn get_proof(&self, in_vert: u32) -> [u32; 4] {
-        // Pick one valid triangle
+        // Pick first valid triangle
         let mut loc_tri_idx = 0;
         while loc_tri_idx < self.tri_vec.len() {
             if self.tri_status_vec[loc_tri_idx] != TriStatus::Free {
@@ -862,27 +1027,56 @@ impl Star {
         let first_tri = self.tri_vec[loc_tri_idx];
         let ex_vert = first_tri.v[0]; // First proof point
 
-        // Find another triangle not containing ex_vert
-        while loc_tri_idx < self.tri_vec.len() {
-            if self.tri_status_vec[loc_tri_idx] == TriStatus::Free {
-                loc_tri_idx += 1;
+        // CUDA: Star.cpp:697-726
+        // Find a triangle (not containing exVert) where all orient4d results match.
+        // This means the proof plane (starVert, inVert, exVert, planeVert)
+        // separates this triangle consistently.
+        for idx in loc_tri_idx..self.tri_vec.len() {
+            if self.tri_status_vec[idx] == TriStatus::Free {
                 continue;
             }
 
-            let tri = self.tri_vec[loc_tri_idx];
+            let tri = self.tri_vec[idx];
 
             if tri.has(ex_vert) {
-                loc_tri_idx += 1;
                 continue;
             }
 
-            // Use orient4d to find proof vertices
-            // Simplified version: just return the triangle + star vertex
-            return [ex_vert, tri.v[0], tri.v[1], tri.v[2]];
+            // Check orient4d for each vertex pair in the triangle
+            // CUDA: ord[vi] = orient4d(starVert, inVert, exVert, planeVert, testVert)
+            let mut all_match = true;
+            let mut prev_ord = 0i32;
+            for vi in 0..3 {
+                let plane_vert = tri.v[vi];
+                let test_vert = tri.v[(vi + 1) % 3];
+
+                let ord = predicates::orient4d(
+                    self.points[self.vert as usize],
+                    self.points[in_vert as usize],
+                    self.points[ex_vert as usize],
+                    self.points[plane_vert as usize],
+                    self.points[test_vert as usize],
+                    self.vert,
+                    in_vert,
+                    ex_vert,
+                    plane_vert,
+                    test_vert,
+                );
+
+                if vi > 0 && prev_ord != ord {
+                    all_match = false;
+                    break;
+                }
+                prev_ord = ord;
+            }
+
+            if all_match {
+                return [ex_vert, tri.v[0], tri.v[1], tri.v[2]];
+            }
         }
 
-        // Fallback: return first triangle + star vertex
-        [self.vert, first_tri.v[0], first_tri.v[1], first_tri.v[2]]
+        // Fallback: return first triangle vertices
+        [ex_vert, first_tri.v[0], first_tri.v[1], first_tri.v[2]]
     }
 }
 

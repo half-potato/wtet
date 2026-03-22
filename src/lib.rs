@@ -148,8 +148,15 @@ pub fn find_violated_vertices(
             };
 
             if is_violation {
-                // Collect the opposite vertex (inside circumsphere) — matches CUDA gather
-                failed.insert(vb);
+                // CUDA kerGatherFailedVerts (KerDivision.cu:697-739):
+                // Collects the 3 vertices of the FAILING FACE (shared between the two
+                // violating tets), NOT the intruder vertex. These shared vertices'
+                // stars contain BOTH tets, so do_flipping can see and fix the violation.
+                for vi in 0..4u32 {
+                    if vi != f {
+                        failed.insert(tet[vi as usize]);
+                    }
+                }
             }
         }
     }
@@ -195,29 +202,127 @@ pub async fn delaunay_3d(
     let mut result = state.readback(device, queue).await;
     // Rebuild adjacency from scratch (GPU adjacency may be corrupted by flip races)
     phase2::rebuild_adjacency(&mut result);
+
+    // DIAGNOSTIC: Check orientation BEFORE CPU flips
+    {
+        let num_real = normalized.len() as u32;
+        let big = 100.0_f32;
+        let mut diag_pts: Vec<[f64; 3]> = normalized.iter()
+            .map(|p| [p[0] as f64, p[1] as f64, p[2] as f64])
+            .collect();
+        diag_pts.push([-big as f64, -big as f64, -big as f64]);
+        diag_pts.push([4.0 * big as f64, -big as f64, -big as f64]);
+        diag_pts.push([-big as f64, 4.0 * big as f64, -big as f64]);
+        diag_pts.push([-big as f64, -big as f64, 4.0 * big as f64]);
+        let mut pos = 0usize;
+        let mut neg = 0usize;
+        let mut shown_pos = 0usize;
+        let mut shown_neg = 0usize;
+        for (ti, tet) in result.tets.iter().enumerate() {
+            if tet.iter().any(|&v| v >= num_real) { continue; }
+            let o = predicates::orient3d(
+                diag_pts[tet[0] as usize],
+                diag_pts[tet[1] as usize],
+                diag_pts[tet[2] as usize],
+                diag_pts[tet[3] as usize],
+            );
+            if o > 0.0 {
+                pos += 1;
+                if shown_pos < 3 {
+                    eprintln!("[ORIENT-PRE-CPU] POSITIVE tet[{}]: verts={:?} orient3d={:.6e}", ti, tet, o);
+                    for &v in tet { eprintln!("  v{}: {:?}", v, diag_pts[v as usize]); }
+                    shown_pos += 1;
+                }
+            } else if o < 0.0 {
+                neg += 1;
+                if shown_neg < 3 {
+                    eprintln!("[ORIENT-PRE-CPU] NEGATIVE tet[{}]: verts={:?} orient3d={:.6e}", ti, tet, o);
+                    for &v in tet { eprintln!("  v{}: {:?}", v, diag_pts[v as usize]); }
+                    shown_neg += 1;
+                }
+            }
+        }
+        eprintln!("[ORIENT-PRE-CPU] Before CPU flips: {} positive, {} negative orient3d", pos, neg);
+    }
+
     if config.enable_splaying {
         // Detect insphere violations on CPU using rebuilt (correct) adjacency
         // The GPU gather shader uses GPU adjacency which may miss violations.
         let num_real = normalized.len() as u32;
+
+        // Build extended points array including super-tet vertices
+        // (same coordinates as GPU: gpu/mod.rs lines 151-155)
+        let big = 100.0_f32;
+        let mut extended_points = normalized.clone();
+        extended_points.push([-big, -big, -big]);           // n+0
+        extended_points.push([4.0 * big, -big, -big]);      // n+1
+        extended_points.push([-big, 4.0 * big, -big]);      // n+2
+        extended_points.push([-big, -big, 4.0 * big]);      // n+3
+        extended_points.push([10.0 * big, 10.0 * big, 10.0 * big]); // n+4 (infinity)
+
         let violations = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
             .unwrap_or(0);
         if violations > 0 {
             eprintln!("[DELAUNAY] Phase 2: {} insphere violations, running CPU bistellar flips", violations);
-            // Build extended points array including super-tet vertices
-            // (same coordinates as GPU: gpu/mod.rs lines 151-155)
-            let big = 100.0_f32;
-            let mut extended_points = normalized.clone();
-            extended_points.push([-big, -big, -big]);           // n+0
-            extended_points.push([4.0 * big, -big, -big]);      // n+1
-            extended_points.push([-big, 4.0 * big, -big]);      // n+2
-            extended_points.push([-big, -big, 4.0 * big]);      // n+3
-            extended_points.push([10.0 * big, 10.0 * big, 10.0 * big]); // n+4 (infinity)
 
             // Direct CPU bistellar flips (works with incomplete triangulations)
             phase2::cpu_flip_violations(&extended_points, &mut result, num_real);
             // Rebuild adjacency after CPU flips
             phase2::rebuild_adjacency(&mut result);
+        }
 
+        // After CPU bistellar flips, check for remaining violations.
+        // If any remain, use star splaying to fix them.
+        // CUDA: fixWithStarSplaying runs as FINAL step (GpuDelaunay.cu:95-97)
+        // Iterate star splaying until convergence or max iterations.
+        let max_splay_iters = 5;
+        for splay_iter in 0..max_splay_iters {
+            let remaining = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
+                .unwrap_or(0);
+            if remaining == 0 {
+                break;
+            }
+            eprintln!("[DELAUNAY] {} violations remain, running star splaying (iter {})", remaining, splay_iter + 1);
+            // Populate failed_verts with vertices involved in violations
+            result.failed_verts = find_violated_vertices(
+                &normalized, &result.tets, &result.adjacency, num_real,
+            );
+            eprintln!("[DELAUNAY] Found {} violated vertices for star splaying", result.failed_verts.len());
+            // Use catch_unwind to prevent star splaying bugs from crashing
+            let mut splay_result = result.clone();
+            let splay_points = extended_points.clone();
+            let splay_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                phase2::splay(&splay_points, &mut splay_result);
+                phase2::rebuild_adjacency(&mut splay_result);
+                splay_result
+            }));
+            match splay_ok {
+                Ok(fixed) => {
+                    // Safety check: star splaying should not drastically reduce tet count.
+                    // If starsToTetra failed to reconstruct most tets, the result is unusable.
+                    let original_tet_count = result.tets.len();
+                    let fixed_tet_count = fixed.tets.len();
+                    if fixed_tet_count < original_tet_count / 2 {
+                        eprintln!("[DELAUNAY] Star splaying destroyed triangulation ({} -> {} tets), keeping original",
+                                  original_tet_count, fixed_tet_count);
+                        break;
+                    }
+                    let post_violations = check_delaunay_quality(
+                        &normalized, &fixed.tets, &fixed.adjacency, num_real,
+                    ).unwrap_or(remaining);
+                    if post_violations < remaining {
+                        eprintln!("[DELAUNAY] Star splaying reduced violations: {} -> {}", remaining, post_violations);
+                        result = fixed;
+                    } else {
+                        eprintln!("[DELAUNAY] Star splaying did not improve ({} -> {}), keeping original", remaining, post_violations);
+                        break;
+                    }
+                }
+                Err(_) => {
+                    eprintln!("[DELAUNAY] Star splaying panicked, keeping original result");
+                    break;
+                }
+            }
         }
     }
 

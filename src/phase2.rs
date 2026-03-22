@@ -157,13 +157,13 @@ pub fn cpu_flip_violations(points: &[[f32; 3]], result: &mut DelaunayResult, num
                 if o1 == 0.0 || o2 == 0.0 { continue; }
                 if (o1 > 0.0) == (o2 > 0.0) { continue; }
 
-                // Create tets with positive orientation
-                let t1 = if o1 > 0.0 {
+                // Create tets with negative orient3d (gDel3D convention: orient3d < 0)
+                let t1 = if o1 < 0.0 {
                     [ev1, d, face_opp, e]
                 } else {
                     [ev1, face_opp, d, e]
                 };
-                let t2 = if o2 > 0.0 {
+                let t2 = if o2 < 0.0 {
                     [ev2, d, face_opp, e]
                 } else {
                     [ev2, face_opp, d, e]
@@ -206,7 +206,8 @@ pub fn cpu_flip_violations(points: &[[f32; 3]], result: &mut DelaunayResult, num
                 continue;
             }
 
-            let (t1, t2, t3) = if signs[0] > 0 {
+            // gDel3D convention: orient3d < 0 = correct orientation
+            let (t1, t2, t3) = if signs[0] < 0 {
                 ([p, q, d, e], [q, r, d, e], [r, p, d, e])
             } else {
                 ([q, p, d, e], [r, q, d, e], [p, r, d, e])
@@ -362,6 +363,13 @@ pub fn deduplicate_tets(result: &mut DelaunayResult) {
 
     for i in 0..n {
         let t = result.tets[i];
+
+        // Filter out dead tets (all vertices INVALID, from star splaying)
+        if t.iter().any(|&v| v == INVALID) {
+            keep[i] = false;
+            dupes += 1;
+            continue;
+        }
 
         let mut sorted = t;
         sorted.sort();

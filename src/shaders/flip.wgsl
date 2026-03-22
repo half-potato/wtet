@@ -371,51 +371,15 @@ fn donate_tet(tet_idx: u32) {
 // Allocate slot for 2-3 flip using per-vertex free lists (CUDA: kerAllocateFlip23Slot, lines 888-953)
 // Tries vertices of bottom tet first, then falls back to inf_idx pool.
 //
-// CRITICAL: CUDA uses signed int for locIdx, so `locIdx >= 0` catches underflow.
-// WGSL u32 is always >= 0, so we must check the old count (atomicSub return value) instead.
-fn allocate_flip23_slot(bot_tet: vec4<u32>) -> u32 {
-    let inf_idx = params.y;
-
-    // Try to allocate from vertices of the bottom tet (CUDA lines 917-935)
-    for (var vi = 0u; vi < 4u; vi++) {
-        let vert = tet_vertex(bot_tet, vi);
-
-        if vert >= inf_idx {
-            continue;  // Skip infinity vertices
-        }
-
-        // Check if this vertex has free slots
-        let vert_free_count = atomicLoad(&vert_free_arr[vert]);
-        if vert_free_count > 0u {
-            // Try to claim a slot (CUDA line 926-927)
-            // atomicSub returns the OLD value before subtraction
-            let old_count = atomicSub(&vert_free_arr[vert], 1u);
-
-            if old_count > 0u {
-                // Successfully claimed slot (CUDA line 930)
-                let loc_idx = old_count - 1u;
-                let free_idx = free_arr[vert * MEAN_VERTEX_DEGREE + loc_idx];
-                return free_idx;
-            } else {
-                // Race condition - another thread took the last slot (CUDA line 935)
-                // old_count was 0, atomicSub wrapped to 0xFFFFFFFF — reset to 0
-                atomicStore(&vert_free_arr[vert], 0u);
-            }
-        }
-    }
-
-    // Fall back to inf_idx pool (CUDA lines 940-948)
-    let old_count = atomicSub(&vert_free_arr[inf_idx], 1u);
-
-    if old_count > 0u {
-        let loc_idx = old_count - 1u;
-        let free_idx = free_arr[inf_idx * MEAN_VERTEX_DEGREE + loc_idx];
-        return free_idx;
-    } else {
-        // Out of space — reset underflow and signal failure
-        atomicStore(&vert_free_arr[inf_idx], 0u);
-        return INVALID;
-    }
+// Allocate 1 tet slot from the global tet pool.
+// Uses vert_free_arr[0] as a global atomic counter (next free tet index).
+//
+// This replaces the per-vertex free list approach which had a race condition:
+// concurrent atomicAdd (donation) and atomicSub (allocation) on the same
+// per-vertex counter could overflow the 8-slot block boundary, causing
+// allocations to read tet indices from adjacent blocks (potentially alive tets).
+fn allocate_flip23_slot() -> u32 {
+    return atomicAdd(&vert_free_arr[0], 1u);
 }
 
 // Phase 1: Vote for flip via atomicMin to resolve conflicts between concurrent flips.
@@ -439,6 +403,9 @@ fn flip_vote(
     for (var face_a = 0u; face_a < 4u; face_a++) {
         let opp_packed = get_opp(tet_a, face_a);
         if opp_packed == INVALID { continue; }
+        // CUDA: KerPredicates.cu:443 — skip internal faces (already locally Delaunay)
+        // Internal faces are between tets created by the same flip (siblings).
+        if (opp_packed & OPP_INTERNAL) != 0u { continue; }
 
         let tet_b = decode_opp_tet(opp_packed);
         let face_b = decode_opp_face(opp_packed);
@@ -468,22 +435,28 @@ fn flip_vote(
         let p1 = points[face_v[1]].xyz;
         let p2 = points[face_v[2]].xyz;
 
-        // Insphere test — MUST match CUDA exactly (CommonTypes.h:114-121)
-        // gDel3D orientation is opposite of Shewchuk. With gDel3D's positive
-        // orientation (Shewchuk orient3d < 0), Shewchuk insphere > 0 means
-        // OUTSIDE, insphere < 0 means INSIDE (violation).
-        // Use FULL tet vertices in stored order, not extracted face vertices,
-        // to avoid parity issues with face extraction.
+        // Insphere test — orientation-agnostic (handles both gDel3D and Shewchuk tets).
+        // Violation = point inside circumsphere = insphere * orient > 0.
         let use_exact = params.z != 0u;
         var violation = false;
         let t0 = points[tet_a_data.x].xyz;
         let t1 = points[tet_a_data.y].xyz;
         let t2 = points[tet_a_data.z].xyz;
         let t3 = points[tet_a_data.w].xyz;
+
         if use_exact {
-            violation = insphere_exact(t0, t1, t2, t3, pb) < 0;
+            let insph = insphere_exact(t0, t1, t2, t3, pb);
+            let orient = orient3d_exact(t0, t1, t2, t3);
+            violation = (insph * orient) > 0;
         } else {
-            violation = insphere_simple(t0, t1, t2, t3, pb) < 0.0;
+            let insph_f = insphere_simple(t0, t1, t2, t3, pb);
+            let ad = t0 - t3; let bd = t1 - t3; let cd = t2 - t3;
+            let orient_f = ad.x * (bd.y * cd.z - bd.z * cd.y)
+                         + bd.x * (cd.y * ad.z - cd.z * ad.y)
+                         + cd.x * (ad.y * bd.z - ad.z * bd.y);
+            // Use sign comparison to avoid f32 underflow when both values are tiny.
+            // (insph_f * orient_f) can underflow to 0.0 near degenerate configs.
+            violation = (insph_f > 0.0 && orient_f > 0.0) || (insph_f < 0.0 && orient_f < 0.0);
         }
 
         if !violation { continue; }
@@ -496,6 +469,10 @@ fn flip_vote(
             let edge_vi = select(cor_vi.x, select(cor_vi.y, cor_vi.z, i == 2u), i >= 1u);
             let opp_edge = get_opp(tet_a, edge_vi);
             if opp_edge == INVALID { continue; }
+            // Skip internal faces in 3-2 detection — prevents detecting the reverse
+            // configuration through sibling internal faces (2-3 ↔ 3-2 oscillation).
+            // CUDA: kerCheckDelaunay also skips internal faces in the 3-tet detection.
+            if (opp_edge & OPP_INTERNAL) != 0u { continue; }
             let edge_nei_tet = decode_opp_tet(opp_edge);
             let edge_nei_face = decode_opp_face(opp_edge);
             let edge_nei_data = tets[edge_nei_tet];
@@ -507,14 +484,24 @@ fn flip_vote(
             }
         }
 
-        // Check viability before voting
+        // Check 2-3 viability before voting.
+        // CUDA: KerPredicates.cu:562-583 — check orient3d of each sub-face with topVert.
+        // topVert must be on the OrientPos side (Shewchuk orient3d < 0) of ALL 3 sub-faces
+        // adjacent to the violating face. This ensures new tets preserve orient3d < 0.
         if !is_flip32 {
-            // For 2-3 flip, edge (va,vb) must cross the shared face
-            let s0 = orient3d_exact(pa, pb, p0, p1);
-            let s1 = orient3d_exact(pa, pb, p1, p2);
-            let s2 = orient3d_exact(pa, pb, p2, p0);
-            let edge_crosses_face = (s0 >= 0 && s1 >= 0 && s2 >= 0) || (s0 <= 0 && s1 <= 0 && s2 <= 0);
-            if !edge_crosses_face { continue; }
+            var flip23_ok = true;
+            for (var j = 0u; j < 3u; j++) {
+                let side_vi = select(cor_vi.x, select(cor_vi.y, cor_vi.z, j == 2u), j >= 1u);
+                let fv = get_tet_vi_as_seen_from(side_vi);
+                let fp0 = points[tet_vertex(tet_a_data, fv.x)].xyz;
+                let fp1 = points[tet_vertex(tet_a_data, fv.y)].xyz;
+                let fp2 = points[tet_vertex(tet_a_data, fv.z)].xyz;
+                if orient3d_exact(fp0, fp1, fp2, pb) >= 0 {
+                    flip23_ok = false;
+                    break;
+                }
+            }
+            if !flip23_ok { continue; }
         }
 
         // Vote via atomicMin (CUDA: voteForFlip23/voteForFlip32)
@@ -536,7 +523,11 @@ fn flip_vote(
     }
 }
 
-// Phase 2: Check votes and perform flips for tets in the flip queue.
+// Phase 2: Execute flips for tets validated by check_delaunay + mark_rejected_flips.
+// Queue entries are packed: (tet_idx << 4) | flip_info
+// flip_info = (bot_cor_ord_vi << 2) | bot_vi
+// - bot_vi: which face of tet_a is violated
+// - bot_cor_ord_vi: 0-2 = 3-2 flip (which neighbor shares edge), 3 = 2-3 flip
 @compute @workgroup_size(256)
 fn flip_check(
     @builtin(global_invocation_id) gid: vec3<u32>,
@@ -548,186 +539,77 @@ fn flip_check(
         return;
     }
 
-    let tet_a = flip_queue[idx];
+    // Decode packed queue entry
+    let packed = flip_queue[idx];
+    let tet_a = packed >> 4u;
+    let flip_info = packed & 0xFu;
+    let face_a = flip_info & 3u;
+    var bot_cor_ord_vi = (flip_info >> 2u) & 3u;
+    var is_flip32 = bot_cor_ord_vi < 3u;
+
+    // DEBUG: counters[4]=invalid_opp, [5]=dead_tet_b, [6]=lock_fail, [7]=revalidation_fail
 
     // Skip dead tets
     let info_a = atomicLoad(&tet_info[tet_a]);
     if (info_a & TET_ALIVE) == 0u {
+        // dead tet_a (counted in lock_fail slot for simplicity)
+        atomicAdd(&counters[6], 1u);
         return;
     }
 
     let tet_a_data = tets[tet_a];
+    let inf_idx = params.y;
 
-    // Check each face of tet_a for Delaunay violation
-    for (var face_a = 0u; face_a < 4u; face_a++) {
-        let opp_packed = get_opp(tet_a, face_a);
-        if opp_packed == INVALID {
-            continue;
+    // Read adjacency for the specific violated face
+    let opp_packed = get_opp(tet_a, face_a);
+    if opp_packed == INVALID {
+        atomicAdd(&counters[4], 1u); // INVALID opp (reuse dead_a slot)
+        return;
+    }
+
+    let tet_b = decode_opp_tet(opp_packed);
+    let face_b = decode_opp_face(opp_packed);
+
+    let info_b = atomicLoad(&tet_info[tet_b]);
+    if (info_b & TET_ALIVE) == 0u {
+        atomicAdd(&counters[5], 1u); // dead tet_b
+        return;
+    }
+
+    let tet_b_data = tets[tet_b];
+    let va = tet_vertex(tet_a_data, face_a);
+    let vb = tet_vertex(tet_b_data, face_b);
+
+    let cor_vi = TET_VI_AS_SEEN_FROM[face_a];
+
+    // === Try to lock both tets ===
+    let first = min(tet_a, tet_b);
+    let second = max(tet_a, tet_b);
+    if !try_lock(first) {
+        atomicAdd(&counters[6], 1u); // lock fail (first)
+        return;
+    }
+    if !try_lock(second) {
+        atomicAdd(&counters[6], 1u); // lock fail (second)
+        unlock(first);
+        return;
+    }
+
+    // === Re-validate after locking ===
+    {
+        let opp_recheck = get_opp(tet_a, face_a);
+        if opp_recheck != opp_packed {
+            atomicAdd(&counters[7], 1u); // revalidation fail (opp changed)
+            unlock(second); unlock(first); return;
         }
-
-        let tet_b = decode_opp_tet(opp_packed);
-        let face_b = decode_opp_face(opp_packed);
-
-        let info_b = atomicLoad(&tet_info[tet_b]);
-        if (info_b & TET_ALIVE) == 0u {
-            continue;
+        let back_opp = get_opp(tet_b, face_b);
+        if decode_opp_tet(back_opp) != tet_a {
+            atomicAdd(&counters[7], 1u); // revalidation fail (back_opp mismatch)
+            unlock(second); unlock(first); return;
         }
+    }
 
-        let tet_b_data = tets[tet_b];
-
-        // Get the 5 involved vertices:
-        // va = vertex of tet_a opposite the shared face
-        // vb = vertex of tet_b opposite the shared face
-        let va = tet_vertex(tet_a_data, face_a);
-        let vb = tet_vertex(tet_b_data, face_b);
-
-        // CRITICAL GUARD: Skip if either apex vertex is infinity
-        // CUDA: KerPredWrapper.h:781-801 - if (vert == _infIdx) return SideOut;
-        let inf_idx = params.y;
-        if (va >= inf_idx) || (vb >= inf_idx) {
-            continue;  // Skip flips involving infinity vertex
-        }
-
-        // Get shared face vertices (the 3 vertices of tet_a not including va)
-        var face_v: array<u32, 3>;
-        var si = 0u;
-        for (var i = 0u; i < 4u; i++) {
-            let v = tet_vertex(tet_a_data, i);
-            if v != va {
-                face_v[si] = v;
-                si++;
-            }
-        }
-
-        // CRITICAL GUARD: Skip if any shared face vertex is infinity
-        if (face_v[0] >= inf_idx) || (face_v[1] >= inf_idx) || (face_v[2] >= inf_idx) {
-            continue;  // Skip flips involving infinity vertex
-        }
-
-        let pa = points[va].xyz;
-        let pb = points[vb].xyz;
-        let p0 = points[face_v[0]].xyz;
-        let p1 = points[face_v[1]].xyz;
-        let p2 = points[face_v[2]].xyz;
-
-        // Insphere test — MUST match CUDA exactly (CommonTypes.h:114-121)
-        // gDel3D orientation is opposite of Shewchuk. With gDel3D's positive
-        // orientation (Shewchuk orient3d < 0), Shewchuk insphere > 0 means
-        // OUTSIDE, insphere < 0 means INSIDE (violation).
-        // Use FULL tet vertices in stored order, not extracted face vertices,
-        // to avoid parity issues with face extraction.
-        let use_exact = params.z != 0u;
-        var violation = false;
-        let t0 = points[tet_a_data.x].xyz;
-        let t1 = points[tet_a_data.y].xyz;
-        let t2 = points[tet_a_data.z].xyz;
-        let t3 = points[tet_a_data.w].xyz;
-
-        if use_exact {
-            violation = insphere_exact(t0, t1, t2, t3, pb) < 0;
-        } else {
-            violation = insphere_simple(t0, t1, t2, t3, pb) < 0.0;
-        }
-
-        if !violation {
-            continue;
-        }
-
-        // === Detect 3-2 flip configuration ===
-        // Check if 3 tets share the edge (va, vb) - CUDA: KerPredicates.cu:216-232
-        let cor_vi = TET_VI_AS_SEEN_FROM[face_a];  // 3 other vertices of tet_a
-        var is_flip32 = false;
-        var bot_cor_ord_vi = 3u;  // Which edge is shared (0,1,2 for 3-2, 3 for 2-3)
-
-        for (var i = 0u; i < 3u; i++) {
-            let edge_vi = select(cor_vi.x, select(cor_vi.y, cor_vi.z, i == 2u), i >= 1u);
-            let opp_edge = get_opp(tet_a, edge_vi);
-            if opp_edge == INVALID {
-                continue;
-            }
-            let edge_nei_tet = decode_opp_tet(opp_edge);
-            let edge_nei_face = decode_opp_face(opp_edge);
-            let edge_nei_data = tets[edge_nei_tet];
-            let edge_nei_opp_v = tet_vertex(edge_nei_data, edge_nei_face);
-
-            // Check if this neighbor also points to vb
-            if edge_nei_opp_v == vb {
-                // Found 3-2 configuration!
-                is_flip32 = true;
-                bot_cor_ord_vi = i;
-                break;
-            }
-        }
-
-        // === Determine flip type ===
-        // Check if va-vb edge intersects the shared triangle to determine 2-3 vs 3-2.
-        // Uses exact orient3d for robustness.
-        let s0 = orient3d_exact(pa, pb, p0, p1);
-        let s1 = orient3d_exact(pa, pb, p1, p2);
-        let s2 = orient3d_exact(pa, pb, p2, p0);
-
-        // If the edge (va,vb) doesn't intersect the shared face, a 2-3 flip
-        // would create inverted tets. Check if a 3-2 flip is possible instead.
-        let edge_crosses_face = (s0 >= 0 && s1 >= 0 && s2 >= 0) || (s0 <= 0 && s1 <= 0 && s2 <= 0);
-
-        // === Vote verification (basic — involved tets only) ===
-        // Extended voting on neighbors (in flip_vote) provides probabilistic
-        // conflict reduction. But we only strictly verify the INVOLVED tets
-        // to avoid being too conservative (which causes livelock in tight meshes).
-        // repair_adjacency handles any residual stale pointers from the rare
-        // cases where adjacent flips execute concurrently.
-        {
-            let vote_val = i32(tet_a);
-            if atomicLoad(&tet_vote[tet_a]) != vote_val { continue; }
-            if atomicLoad(&tet_vote[tet_b]) != vote_val { continue; }
-
-            if is_flip32 {
-                let chk_cor_vi_idx = select(cor_vi.x, select(cor_vi.y, cor_vi.z, bot_cor_ord_vi == 2u), bot_cor_ord_vi >= 1u);
-                let chk_side_opp = get_opp(tet_a, chk_cor_vi_idx);
-                if chk_side_opp != INVALID {
-                    let chk_tet_c = decode_opp_tet(chk_side_opp);
-                    if atomicLoad(&tet_vote[chk_tet_c]) != vote_val { continue; }
-                }
-            }
-        }
-
-        // === Try to lock both tets ===
-        // CRITICAL: Always lock lower-indexed tet first to prevent GPU lockstep deadlock.
-        // Without this, two threads in the same wavefront processing the same pair
-        // (one as tet_a→tet_b, other as tet_b→tet_a) would each lock their own tet
-        // first, then fail to lock the other, causing both to give up.
-        let first = min(tet_a, tet_b);
-        let second = max(tet_a, tet_b);
-        if !try_lock(first) {
-            continue;
-        }
-        if !try_lock(second) {
-            unlock(first);
-            continue;
-        }
-
-        // === Re-validate after locking ===
-        // Another thread may have flipped one of these tets between our initial
-        // read and the lock acquisition. Check that adjacency is still valid.
-        {
-            // Check tet_a's forward pointer hasn't changed
-            let opp_recheck = get_opp(tet_a, face_a);
-            if opp_recheck != opp_packed {
-                unlock(second);
-                unlock(first);
-                continue;
-            }
-
-            // Check tet_b's back-pointer still references tet_a
-            let back_opp = get_opp(tet_b, face_b);
-            if decode_opp_tet(back_opp) != tet_a {
-                unlock(second);
-                unlock(first);
-                continue;
-            }
-        }
-
-        if is_flip32 {
+    if is_flip32 {
             // === Execute 3-2 flip ===
             // CUDA: KerDivision.cu:441-501
             // Three tets sharing edge (va,vb) → Two tets
@@ -742,9 +624,10 @@ fn flip_check(
             // Note: tet_c might be between first and second in ordering,
             // but since we already hold both, just try tet_c directly.
             if !try_lock(tet_c) {
+                atomicAdd(&counters[6], 1u); // lock fail (tet_c)
                 unlock(second);
                 unlock(first);
-                continue;
+                return;
             }
 
             let tet_c_data = tets[tet_c];
@@ -821,22 +704,33 @@ fn flip_check(
             tets[tet_a] = c0;
             tets[tet_b] = c1;
 
-            // Donate side tet back to free list (CUDA lines 495-500)
-            donate_tet(tet_c);
+            // Mark side tet as dead (CUDA lines 495-500)
+            // NOTE: Unlike CUDA, we do NOT return tet_c to the free list here.
+            // CUDA uses a separate kerAllocateFlip23Slot kernel that runs BEFORE kerFlip,
+            // so 3-2 donated slots can't be immediately picked up by 2-3 flips in the
+            // same dispatch. Our combined kernel would create a race: 3-2 frees slot X,
+            // concurrent 2-3 allocates slot X → both flips reference the same tet slot
+            // → update_flip_trace chain corruption → wrong vert_tet after relocate.
+            // Just marking dead is safe; we pre-allocate enough free slots at startup.
+            atomicAnd(&tet_info[tet_c], ~TET_ALIVE);
 
             // Write tet_msg_arr for bot and top (CUDA lines 504-505)
             tet_msg_arr[tet_a] = vec2<i32>(new_idx_0, i32(glob_flip_idx));
             tet_msg_arr[tet_b] = vec2<i32>(new_idx_1, i32(glob_flip_idx));
 
             // Write encodedFaceVi (CUDA line 512)
-            encoded_face_vi_arr[flip_idx] = encoded_face_vi;
+            // CRITICAL: Use glob_flip_idx for flip_arr/encoded_face_vi_arr writes
+            // so update_flip_trace can read at global indices (CUDA writes at flipArr[globFlipIdx])
+            encoded_face_vi_arr[glob_flip_idx] = encoded_face_vi;
 
             // Write FlipItem (CUDA lines 521-524)
             // Layout: [_v[0..3], _v[4], _t[0], _t[1], _t[2]]
             // _v[0..3] = c0 vertices, _v[4] = c1[3] = bot_b
             // _t[2] = -tet_c (negative = Flip32)
-            flip_arr[flip_idx * 2u] = vec4<i32>(i32(c0.x), i32(c0.y), i32(c0.z), i32(c0.w));
-            flip_arr[flip_idx * 2u + 1u] = vec4<i32>(i32(bot_b), i32(tet_a), i32(tet_b), -i32(tet_c));
+            flip_arr[glob_flip_idx * 2u] = vec4<i32>(i32(c0.x), i32(c0.y), i32(c0.z), i32(c0.w));
+            // CUDA: _t[2] = makeNegative(sideTetIdx) = -(sideTetIdx + 2)
+            // Must match update_flip_trace.wgsl's make_positive: -(v + 2)
+            flip_arr[glob_flip_idx * 2u + 1u] = vec4<i32>(i32(bot_b), i32(tet_a), i32(tet_b), -(i32(tet_c) + 2));
 
             atomicStore(&tet_info[tet_a], TET_ALIVE | TET_CHANGED);
             atomicStore(&tet_info[tet_b], TET_ALIVE | TET_CHANGED);
@@ -852,20 +746,12 @@ fn flip_check(
             return;
         }
 
-        // For 2-3 flip, the edge (va,vb) MUST cross the shared face,
-        // otherwise the new tets would be inverted.
-        if !edge_crosses_face {
-            unlock(first);
-            unlock(second);
-            continue;
-        }
-
         // === Execute 2-3 flip ===
         // CUDA: KerDivision.cu:405-440
         // Two tets sharing a face → three tets sharing an edge.
 
         // Allocate 1 slot from per-vertex free lists (2 tets → 3 tets = net +1)
-        let new_slot = allocate_flip23_slot(tet_a_data);
+        let new_slot = allocate_flip23_slot();
         if new_slot == INVALID {
             unlock(second);
             unlock(first);
@@ -930,14 +816,16 @@ fn flip_check(
         tet_msg_arr[tet_b] = vec2<i32>(new_idx_1, i32(glob_flip_idx));
 
         // Write encodedFaceVi (CUDA line 512)
-        encoded_face_vi_arr[flip_idx] = encoded_face_vi_23;
+        // CRITICAL: Use glob_flip_idx for flip_arr/encoded_face_vi_arr writes
+        // so update_flip_trace can read at global indices (CUDA writes at flipArr[globFlipIdx])
+        encoded_face_vi_arr[glob_flip_idx] = encoded_face_vi_23;
 
         // Write FlipItem (CUDA lines 521-524)
         // Layout: [_v[0..3], _v[4], _t[0], _t[1], _t[2]]
         // _v[0..3] = c0 vertices, _v[4] = c1[2] = cor_v_2 (Flip23)
         // _t[2] = new_slot (positive = Flip23)
-        flip_arr[flip_idx * 2u] = vec4<i32>(i32(c0.x), i32(c0.y), i32(c0.z), i32(c0.w));
-        flip_arr[flip_idx * 2u + 1u] = vec4<i32>(i32(cor_v_2), i32(tet_a), i32(tet_b), i32(new_slot));
+        flip_arr[glob_flip_idx * 2u] = vec4<i32>(i32(c0.x), i32(c0.y), i32(c0.z), i32(c0.w));
+        flip_arr[glob_flip_idx * 2u + 1u] = vec4<i32>(i32(cor_v_2), i32(tet_a), i32(tet_b), i32(new_slot));
 
         // Mark new tets as alive
         atomicStore(&tet_info[tet_a], TET_ALIVE | TET_CHANGED);
@@ -953,7 +841,5 @@ fn flip_check(
         flip_queue_next[slot + 1u] = tet_b;
         flip_queue_next[slot + 2u] = new_slot;
 
-        // One flip per thread — return after first success
         return;
-    }
 }

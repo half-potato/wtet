@@ -15,7 +15,10 @@
 @group(0) @binding(6) var<storage, read_write> counters: array<atomic<u32>>;
 @group(0) @binding(7) var<uniform> params: vec4<u32>; // x = act_tet_num, y = vote_offset, z = compact_mode
 
-const TET_CHECKED: u32 = 2u; // Bit 1 set
+// CUDA bit layout: bit 0 = Alive, bit 1 = Changed(1)/Checked(0), bit 2 = InStar
+// "Checked" = bit 1 CLEAR, "Changed" = bit 1 SET
+// setTetCheckState(c, Checked) = setBitState(c, 1, false) = CLEAR bit 1
+const TET_CHANGED: u32 = 2u; // Bit 1
 const INVALID: u32 = 0xFFFFFFFFu;
 
 // TetViAsSeenFrom[vi] gives the 3 other vertices in counter-clockwise order when seen from vi
@@ -81,7 +84,8 @@ fn mark_rejected_flips(@builtin(global_invocation_id) gid: vec3<u32>,
 
         if flip_val == -1 {
             // No flip from this tet
-            tet_info[u32(tet_idx)] |= TET_CHECKED;
+            // CUDA: setTetCheckState(tetInfoArr[tetIdx], Checked) = CLEAR bit 1
+            tet_info[u32(tet_idx)] &= ~TET_CHANGED;
             act_tet_vec[idx] = -1;
         } else {
             // Check if all participating tets agree on this flip
@@ -153,7 +157,11 @@ fn mark_rejected_flips(@builtin(global_invocation_id) gid: vec3<u32>,
             workgroupBarrier();
 
             if flip_loc_idx != -1 {
-                flip_to_tet[flip_offset + u32(flip_loc_idx)] = flip_val;
+                // Pack tet_idx and flip_info so flip_check knows exactly which face to flip
+                // without re-checking insphere. Encoding: (tet_idx << 4) | flip_info
+                // flip_info = (bot_cor_ord_vi << 2) | bot_vi (4 bits from check_delaunay)
+                let flip_info = u32(flip_val) & 0x0Fu;
+                flip_to_tet[flip_offset + u32(flip_loc_idx)] = i32((u32(tet_idx) << 4u) | flip_info);
             }
 
             if lid.x == 0u {

@@ -100,6 +100,9 @@ pub struct SplayingContext {
     int_stack: Vec<usize>,
     /// Visit counter
     visit_id: i32,
+    /// Set of tet indices that have been claimed by stars (marked dead).
+    /// CUDA: setTetAliveState(false) in tetVisitCreateStar (Splaying.cpp:131)
+    dead_tets: std::collections::HashSet<usize>,
 }
 
 impl SplayingContext {
@@ -120,6 +123,7 @@ impl SplayingContext {
             tet_tri_map,
             int_stack: Vec::new(),
             visit_id: 1,
+            dead_tets: std::collections::HashSet::new(),
         }
     }
 
@@ -140,6 +144,10 @@ impl SplayingContext {
 
         // DFS through all tets containing vert
         while let Some(tet_idx) = self.int_stack.pop() {
+            // CUDA: setTetAliveState((*_tetInfoVec)[tetIdx], false);  (Splaying.cpp:131)
+            // Mark tet as dead — it will be revived in starsToTetra if still valid
+            self.dead_tets.insert(tet_idx);
+
             let tet = result.tets[tet_idx];
             let tet_opp = result.adjacency[tet_idx];
 
@@ -226,8 +234,11 @@ impl SplayingContext {
                     continue;
                 }
 
-                // Update adjacency to point to local star triangle
-                star.tri_opp_vec[tri_idx].set_opp(vi, opp_tri_idx, opp_tri_vi as u32);
+                // Update adjacency to point to local star triangle.
+                // Use set_opp_tri + set_opp_vi to PRESERVE flags (sphere_fail, special).
+                // CUDA: Splaying.cpp:193-194 — setOppTri + setOppVi preserve flags.
+                star.tri_opp_vec[tri_idx].set_opp_tri(vi, opp_tri_idx);
+                star.tri_opp_vec[tri_idx].set_opp_vi(vi, opp_tri_vi as u32);
             }
         }
     }
@@ -257,6 +268,39 @@ impl SplayingContext {
         Some(star)
     }
 
+    /// Add new link triangles to the work queue for consistency checking.
+    ///
+    /// Ported from Splaying.cpp lines 264-292 (compareStarAddQueue)
+    ///
+    /// For each link triangle NOT in original triangulation (tetIdxVec == -1),
+    /// add 3 facets (one per edge) to the global work queue.
+    fn compare_star_add_queue(&mut self, star_idx: usize) {
+        let vert = self.stars[star_idx].vert;
+
+        for tri_idx in 0..self.stars[star_idx].tri_vec.len() {
+            if self.stars[star_idx].tri_status_vec[tri_idx] == TriStatus::Free {
+                continue;
+            }
+            if self.stars[star_idx].tet_idx_vec[tri_idx] != -1 {
+                continue; // Already in triangulation, no need to check
+            }
+
+            // Link triangle not in triangulation — add 3 facets
+            let tri = self.stars[star_idx].tri_vec[tri_idx];
+
+            for vi in 0..3 {
+                let facet = Facet {
+                    from: vert,
+                    from_idx: tri_idx as u32,
+                    to: tri.v[vi],
+                    v0: tri.v[(vi + 1) % 3],
+                    v1: tri.v[(vi + 2) % 3],
+                };
+                self.facet_queue.push(facet);
+            }
+        }
+    }
+
     /// Create stars for all failed vertices and perform initial flipping.
     ///
     /// Ported from Splaying.cpp lines 217-262 (makeFailedStarsAndQueue)
@@ -266,8 +310,6 @@ impl SplayingContext {
         eprintln!("[SPLAY] Total tets available: {}", result.tets.len());
 
         for &failed_vert in &result.failed_verts.clone() {
-            eprintln!("[SPLAY] --- Extracting star for vertex {} ---", failed_vert);
-
             let mut star = match self.create_from_tetra(failed_vert, result) {
                 Some(s) => s,
                 None => {
@@ -282,21 +324,19 @@ impl SplayingContext {
                 star.tri_vec.len()
             );
 
-            // Show triangle details
-            for (i, tri) in star.tri_vec.iter().take(5).enumerate() {
-                eprintln!("[SPLAY]     Tri {}: [{}, {}, {}]", i, tri.v[0], tri.v[1], tri.v[2]);
-            }
-            if star.tri_vec.len() > 5 {
-                eprintln!("[SPLAY]     ... and {} more", star.tri_vec.len() - 5);
-            }
-
             // Perform initial flipping on star
-            eprintln!("[SPLAY]   Performing initial flipping...");
+            // CUDA: Star.cpp:305-324 — flipping() checks OPP_SPHERE_FAIL
             star.do_flipping();
-            eprintln!("[SPLAY]   Flipping complete");
 
             // Add to star list
+            let star_idx = self.stars.len();
             self.stars.push(star);
+
+            // CUDA: Splaying.cpp:248 — compareStarAddQueue(star)
+            // Add all NEW link triangles (tetIdxVec == -1) to the work queue.
+            // This is CRITICAL: without it, process_queue has no work items
+            // and neighbor stars are never created for consistency.
+            self.compare_star_add_queue(star_idx);
         }
 
         eprintln!("[SPLAY] Extracted {} stars total", self.stars.len());
@@ -325,9 +365,18 @@ impl SplayingContext {
         let mut stack = Vec::new();
         let mut visited = vec![0i32; result.tets.len()];
 
+        // Safety limit to prevent infinite loops in degenerate cases.
+        // CUDA should converge in O(n) operations. Use a tighter bound.
+        let max_queue_ops = result.tets.len() * 10;
+
         while !self.facet_queue.is_empty() {
             let facet = self.facet_queue.pop().unwrap();
             count += 1;
+
+            if count > max_queue_ops {
+                eprintln!("[SPLAY] WARNING: process_queue exceeded {} iterations, stopping", max_queue_ops);
+                break;
+            }
 
             let from_vert = facet.from;
             let to_vert = facet.to;
@@ -408,8 +457,14 @@ impl SplayingContext {
             // Try inserting vertices from facet triangle into to-star
             let check_tri = crate::cpu::facet::Tri::new(from_vert, facet.v0, facet.v1);
 
+            let to_star_vert = self.stars[to_idx].vert;
             for vi in 0..3 {
                 let vert = check_tri.v[vi];
+
+                // Never insert the star's own center vertex
+                if vert == to_star_vert {
+                    continue;
+                }
 
                 if self.stars[to_idx].has_link_vert(vert) {
                     continue;
@@ -455,26 +510,35 @@ impl SplayingContext {
     /// Convert all stars back to tetrahedra.
     ///
     /// Ported from Splaying.cpp lines 485-615 (starsToTetra)
+    ///
+    /// CUDA approach:
+    /// 1. tetVisitCreateStar already marked all star tets as DEAD
+    /// 2. For alive link triangles with tet_idx >= 0: revive the tet
+    /// 3. For alive link triangles with tet_idx == -1: find from other stars or create new
+    /// 4. Set adjacency for all new/modified tets
+    /// 5. Dead tets (not revived) are effectively removed
     fn stars_to_tetra(&mut self, result: &mut DelaunayResult) {
         eprintln!("[SPLAY] ========== REINTEGRATION ==========");
         eprintln!("[SPLAY] Reintegrating {} stars", self.stars.len());
         eprintln!("[SPLAY] Current tet count: {}", result.tets.len());
+        eprintln!("[SPLAY] Dead tets from star extraction: {}", self.dead_tets.len());
 
         use crate::types::{encode_opp, INVALID};
 
         let mut new_tet_count = 0;
+        let mut revived_count = 0;
 
-        // Build star map for quick lookup
+        // Build star map for quick lookup (like CUDA's _starVec indexed by vertex)
         let mut star_map: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
         for (idx, star) in self.stars.iter().enumerate() {
             star_map.insert(star.vert, idx);
         }
 
-        // Process each star
+        // PASS 1: Create/reuse tets and set tetIdxVec
+        // (CUDA Splaying.cpp:497-555)
         for star_idx in 0..self.stars.len() {
             let vert = self.stars[star_idx].vert;
 
-            // Iterate link triangles
             for tri_idx in 0..self.stars[star_idx].tri_vec.len() {
                 if self.stars[star_idx].tri_status_vec[tri_idx] == TriStatus::Free {
                     continue;
@@ -483,13 +547,16 @@ impl SplayingContext {
                 let tri = self.stars[star_idx].tri_vec[tri_idx];
                 let mut tet_idx = self.stars[star_idx].tet_idx_vec[tri_idx];
 
-                // If tet already exists, skip (reused from extraction)
+                // CUDA: if (tetIdx >= 0) { setTetAliveState(true); continue; }
                 if tet_idx != -1 {
+                    // Revive this tet — it's still valid (not flipped away)
+                    self.dead_tets.remove(&(tet_idx as usize));
+                    revived_count += 1;
                     continue;
                 }
 
-                // Find tet in 3 other stars
-                let mut tet_in_star = [None; 3];
+                // tetIdx == -1: new tet needed. Find in 3 other stars first.
+                let mut tet_in_star: [Option<usize>; 3] = [None; 3];
 
                 for vi in 0..3 {
                     let to_vert = tri.v[vi];
@@ -501,117 +568,186 @@ impl SplayingContext {
 
                     let to_star_idx = match star_map.get(&to_vert) {
                         Some(&idx) => idx,
-                        None => {
-                            eprintln!("[SPLAY] WARNING: Star for vertex {} not found", to_vert);
-                            continue;
-                        }
+                        None => continue,
                     };
 
                     let to_tri_idx = match self.stars[to_star_idx].get_link_tri_idx(&to_tri) {
                         Some(idx) => idx,
-                        None => {
-                            eprintln!(
-                                "[SPLAY] WARNING: Triangle not found in star {}",
-                                to_vert
-                            );
-                            continue;
-                        }
+                        None => continue,
                     };
 
                     tet_in_star[vi] = Some(to_tri_idx);
 
-                    // Check if other star already has tet_idx
+                    // Check if other star already allocated a tet_idx
                     if self.stars[to_star_idx].tet_idx_vec[to_tri_idx] != -1 {
                         tet_idx = self.stars[to_star_idx].tet_idx_vec[to_tri_idx];
                     }
                 }
 
-                // Create new tet if needed
+                // Create new tet if not found in any star
                 if tet_idx == -1 {
                     tet_idx = result.tets.len() as i32;
-
                     let tet = [tri.v[0], tri.v[1], tri.v[2], vert];
                     result.tets.push(tet);
                     result.adjacency.push([INVALID; 4]);
-
                     new_tet_count += 1;
+                } else {
+                    // Tet was found in another star. Update its vertex data
+                    // (in case it was a recycled dead tet with old data).
+                    result.tets[tet_idx as usize] = [tri.v[0], tri.v[1], tri.v[2], vert];
+                    result.adjacency[tet_idx as usize] = [INVALID; 4];
+                    // This tet is alive now
+                    self.dead_tets.remove(&(tet_idx as usize));
                 }
 
-                // Store tet_idx in all 4 stars
+                // Store tet_idx in this star and all 3 other stars
                 self.stars[star_idx].tet_idx_vec[tri_idx] = tet_idx;
-
                 for vi in 0..3 {
                     if let Some(to_tri_idx) = tet_in_star[vi] {
                         let to_star_idx = *star_map.get(&tri.v[vi]).unwrap();
                         self.stars[to_star_idx].tet_idx_vec[to_tri_idx] = tet_idx;
                     }
                 }
+            }
+        }
 
-                // Set up adjacency for 3 neighbors (opposite faces 0, 1, 2)
+        // PASS 2: Set adjacency
+        // (CUDA Splaying.cpp:557-608)
+        for star_idx in 0..self.stars.len() {
+            let vert = self.stars[star_idx].vert;
+
+            for tri_idx in 0..self.stars[star_idx].tri_vec.len() {
+                if self.stars[star_idx].tri_status_vec[tri_idx] == TriStatus::Free {
+                    continue;
+                }
+
+                let tet_idx = self.stars[star_idx].tet_idx_vec[tri_idx];
+                if tet_idx < 0 {
+                    continue;
+                }
+
+                let tri = self.stars[star_idx].tri_vec[tri_idx];
                 let tri_opp = self.stars[star_idx].tri_opp_vec[tri_idx];
                 let tet = result.tets[tet_idx as usize];
 
+                // Set 3 face adjacencies (opposite to link triangle vertices)
+                // CUDA: Splaying.cpp:562-584
                 for vi in 0..3 {
+                    if tri_opp.t[vi] == INVALID {
+                        continue; // Boundary face
+                    }
                     let opp_tri_idx = tri_opp.get_opp_tri(vi) as usize;
                     let opp_tri_vi = tri_opp.get_opp_vi(vi) as usize;
+
+                    if opp_tri_idx >= self.stars[star_idx].tet_idx_vec.len() {
+                        continue;
+                    }
                     let opp_tri_tet_idx = self.stars[star_idx].tet_idx_vec[opp_tri_idx];
 
                     if opp_tri_tet_idx == -1 {
-                        continue; // Neighbor not created yet, they'll set our adjacency
+                        continue; // Neighbor not created yet
                     }
 
-                    // Find local vertex indices
                     let tri_vert = tri.v[vi];
-                    let cur_tet_vi = tet.iter().position(|&v| v == tri_vert).unwrap();
+                    let cur_tet_vi = match tet.iter().position(|&v| v == tri_vert) {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
                     let opp_tri = self.stars[star_idx].tri_vec[opp_tri_idx];
                     let opp_vert = opp_tri.v[opp_tri_vi];
                     let opp_tet = result.tets[opp_tri_tet_idx as usize];
-                    let opp_tet_vi = opp_tet.iter().position(|&v| v == opp_vert).unwrap();
+                    let opp_tet_vi = match opp_tet.iter().position(|&v| v == opp_vert) {
+                        Some(p) => p,
+                        None => continue,
+                    };
 
-                    // Set both ways
                     result.adjacency[tet_idx as usize][cur_tet_vi] =
                         encode_opp(opp_tri_tet_idx as u32, opp_tet_vi as u32);
                     result.adjacency[opp_tri_tet_idx as usize][opp_tet_vi] =
                         encode_opp(tet_idx as u32, cur_tet_vi as u32);
                 }
 
-                // Set adjacency for 4th neighbor (opposite star vertex)
-                // Find this tet from star of tri.v[0]
-                if let Some(&to_star_idx) = star_map.get(&tri.v[0]) {
-                    if let Some(tri_idx2) = tet_in_star[0] {
-                        let tet_idx2 = self.stars[to_star_idx].tet_idx_vec[tri_idx2];
+                // Set 4th face adjacency (opposite to star vertex)
+                // CUDA: Splaying.cpp:586-608
+                // Navigate via star of tri.v[0] to find the tet on the other side
+                let v0 = tri.v[0];
+                let to_star_idx = match star_map.get(&v0) {
+                    Some(&idx) => idx,
+                    None => continue,
+                };
 
-                        if tet_idx2 != -1 {
-                            let tri2 = self.stars[to_star_idx].tri_vec[tri_idx2];
-                            let vi2 = tri2.v.iter().position(|&v| v == vert).unwrap();
+                // Find the same tet in v0's star
+                let to_tri = crate::cpu::facet::Tri::new(
+                    vert,
+                    tri.v[1],
+                    tri.v[2],
+                );
+                let to_tri_idx = match self.stars[to_star_idx].get_link_tri_idx(&to_tri) {
+                    Some(idx) => idx,
+                    None => continue,
+                };
 
-                            let tri_opp2 = self.stars[to_star_idx].tri_opp_vec[tri_idx2];
-                            let opp_tri_idx2 = tri_opp2.get_opp_tri(vi2) as usize;
-                            let opp_tri_vi2 = tri_opp2.get_opp_vi(vi2) as usize;
-                            let opp_tri_tet_idx2 = self.stars[to_star_idx].tet_idx_vec[opp_tri_idx2];
+                // Find vert's position in the link triangle of v0's star
+                let tri2 = self.stars[to_star_idx].tri_vec[to_tri_idx];
+                let vi2 = match tri2.v.iter().position(|&v| v == vert) {
+                    Some(p) => p,
+                    None => continue,
+                };
 
-                            if opp_tri_tet_idx2 != -1 {
-                                let opp_tri2 = self.stars[to_star_idx].tri_vec[opp_tri_idx2];
-                                let opp_vert = opp_tri2.v[opp_tri_vi2];
-                                let opp_tet = result.tets[opp_tri_tet_idx2 as usize];
-                                let opp_tet_vi = opp_tet.iter().position(|&v| v == opp_vert).unwrap();
-                                let cur_tet_vi = tet.iter().position(|&v| v == vert).unwrap();
-
-                                // Set both ways
-                                result.adjacency[tet_idx as usize][cur_tet_vi] =
-                                    encode_opp(opp_tri_tet_idx2 as u32, opp_tet_vi as u32);
-                                result.adjacency[opp_tri_tet_idx2 as usize][opp_tet_vi] =
-                                    encode_opp(tet_idx as u32, cur_tet_vi as u32);
-                            }
-                        }
-                    }
+                let tri_opp2 = self.stars[to_star_idx].tri_opp_vec[to_tri_idx];
+                if tri_opp2.t[vi2] == INVALID {
+                    continue;
                 }
+                let opp_tri_idx2 = tri_opp2.get_opp_tri(vi2) as usize;
+                let opp_tri_vi2 = tri_opp2.get_opp_vi(vi2) as usize;
+
+                if opp_tri_idx2 >= self.stars[to_star_idx].tet_idx_vec.len() {
+                    continue;
+                }
+                let opp_tri_tet_idx2 = self.stars[to_star_idx].tet_idx_vec[opp_tri_idx2];
+
+                if opp_tri_tet_idx2 == -1 {
+                    continue;
+                }
+
+                let opp_tri2 = self.stars[to_star_idx].tri_vec[opp_tri_idx2];
+                if opp_tri_vi2 >= 3 {
+                    continue;
+                }
+                let opp_vert = opp_tri2.v[opp_tri_vi2];
+                let opp_tet = result.tets[opp_tri_tet_idx2 as usize];
+                let opp_tet_vi = match opp_tet.iter().position(|&v| v == opp_vert) {
+                    Some(p) => p,
+                    None => continue,
+                };
+                let cur_tet_vi = match tet.iter().position(|&v| v == vert) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                result.adjacency[tet_idx as usize][cur_tet_vi] =
+                    encode_opp(opp_tri_tet_idx2 as u32, opp_tet_vi as u32);
+                result.adjacency[opp_tri_tet_idx2 as usize][opp_tet_vi] =
+                    encode_opp(tet_idx as u32, cur_tet_vi as u32);
+            }
+        }
+
+        // PASS 3: Kill remaining dead tets
+        // CUDA: dead tets have tetInfo=0 and are filtered by compactTetras.
+        // We mark them with INVALID vertices so check_delaunay_quality skips them.
+        let dead_count = self.dead_tets.len();
+        for &dead_idx in &self.dead_tets {
+            if dead_idx < result.tets.len() {
+                result.tets[dead_idx] = [INVALID, INVALID, INVALID, INVALID];
+                result.adjacency[dead_idx] = [INVALID; 4];
             }
         }
 
         eprintln!("[SPLAY] Reintegration complete:");
+        eprintln!("[SPLAY]   Revived tets: {}", revived_count);
         eprintln!("[SPLAY]   New tets created: {}", new_tet_count);
+        eprintln!("[SPLAY]   Dead tets removed: {}", dead_count);
         eprintln!("[SPLAY]   Final tet count: {}", result.tets.len());
     }
 }
