@@ -22,6 +22,7 @@ pollster = "0.4"
 log = "0.4"
 futures-channel = "0.3"
 hilbert_index = "0.2.0"
+geometry-predicates = "0.3"
 
 [dev-dependencies]
 env_logger = "0.11"

@@ -61,27 +61,15 @@ pub fn check_delaunay_quality(
             let opp_tet = tets[opp_ti as usize];
             let vb = opp_tet[opp_f as usize];
 
-            let pa = pts64[tet[0] as usize];
-            let pb = pts64[tet[1] as usize];
-            let pc = pts64[tet[2] as usize];
-            let pd = pts64[tet[3] as usize];
-            let pe = pts64[vb as usize];
+            // Use orient4d with full SoS: orient4d < 0 = violation (OrientNeg = inside circumsphere)
+            let o4 = predicates::orient4d(
+                pts64[tet[0] as usize], pts64[tet[1] as usize],
+                pts64[tet[2] as usize], pts64[tet[3] as usize],
+                pts64[vb as usize],
+                tet[0], tet[1], tet[2], tet[3], vb,
+            );
 
-            let orient = predicates::orient3d(pa, pb, pc, pd);
-            let insph = predicates::insphere(pa, pb, pc, pd, pe);
-            // Violation = e inside circumsphere of (a,b,c,d)
-            // Shewchuk convention: insphere > 0 means inside when orient > 0,
-            //                      insphere < 0 means inside when orient < 0.
-            // Equivalently: insphere * orient > 0 means inside.
-            let is_violation = if orient > 0.0 {
-                insph > 0.0
-            } else if orient < 0.0 {
-                insph < 0.0
-            } else {
-                continue;
-            };
-
-            if is_violation {
+            if o4 < 0 {
                 violations += 1;
             }
         }
@@ -130,24 +118,15 @@ pub fn find_violated_vertices(
             let opp_tet = tets[opp_ti as usize];
             let vb = opp_tet[opp_f as usize];
 
-            let pa = pts64[tet[0] as usize];
-            let pb = pts64[tet[1] as usize];
-            let pc = pts64[tet[2] as usize];
-            let pd = pts64[tet[3] as usize];
-            let pe = pts64[vb as usize];
+            // Use orient4d with full SoS: orient4d < 0 = violation (OrientNeg = inside circumsphere)
+            let o4 = predicates::orient4d(
+                pts64[tet[0] as usize], pts64[tet[1] as usize],
+                pts64[tet[2] as usize], pts64[tet[3] as usize],
+                pts64[vb as usize],
+                tet[0], tet[1], tet[2], tet[3], vb,
+            );
 
-            let orient = predicates::orient3d(pa, pb, pc, pd);
-            let insph = predicates::insphere(pa, pb, pc, pd, pe);
-            // Violation = e inside circumsphere of (a,b,c,d)
-            let is_violation = if orient > 0.0 {
-                insph > 0.0
-            } else if orient < 0.0 {
-                insph < 0.0
-            } else {
-                continue;
-            };
-
-            if is_violation {
+            if o4 < 0 {
                 // CUDA kerGatherFailedVerts (KerDivision.cu:697-739):
                 // Collects the 3 vertices of the FAILING FACE (shared between the two
                 // violating tets), NOT the intruder vertex. These shared vertices'
@@ -271,24 +250,43 @@ pub async fn delaunay_3d(
             phase2::rebuild_adjacency(&mut result);
         }
 
-        // After CPU bistellar flips, check for remaining violations.
-        // If any remain, use star splaying to fix them.
-        // CUDA: fixWithStarSplaying runs as FINAL step (GpuDelaunay.cu:95-97)
-        // Iterate star splaying until convergence or max iterations.
-        let max_splay_iters = 5;
-        for splay_iter in 0..max_splay_iters {
-            let remaining = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
-                .unwrap_or(0);
-            if remaining == 0 {
-                break;
+        // After CPU flips, try full BW reconstruction first — cheap and guaranteed correct.
+        let remaining = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
+            .unwrap_or(0);
+        if remaining > 0 {
+            eprintln!("[DELAUNAY] {} violations remain, running full BW reconstruction", remaining);
+            phase2::full_bw_reconstruction(&extended_points, &mut result, num_real);
+            phase2::rebuild_adjacency(&mut result);
+            let post = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
+                .unwrap_or(remaining);
+            eprintln!("[DELAUNAY] After BW reconstruction: {} violations", post);
+        }
+
+        // If BW reconstruction didn't fully resolve, try star splaying as last resort
+        // (only for small violation counts to avoid OOM)
+        let remaining = check_delaunay_quality(&normalized, &result.tets, &result.adjacency, num_real)
+            .unwrap_or(0);
+        if remaining > 0 && remaining <= 10 {
+            eprintln!("[DELAUNAY] {} violations remain, trying star splaying", remaining);
+            {
+                let mut orphan_count = 0;
+                for ti in 0..result.tets.len() {
+                    if result.tets[ti].iter().any(|&v| v == INVALID) { continue; }
+                    let invalid_faces = (0..4).filter(|&f| result.adjacency[ti][f] == INVALID).count();
+                    if invalid_faces >= 2 {
+                        result.tets[ti] = [INVALID, INVALID, INVALID, INVALID];
+                        result.adjacency[ti] = [INVALID; 4];
+                        orphan_count += 1;
+                    }
+                }
+                if orphan_count > 0 {
+                    phase2::rebuild_adjacency(&mut result);
+                }
             }
-            eprintln!("[DELAUNAY] {} violations remain, running star splaying (iter {})", remaining, splay_iter + 1);
-            // Populate failed_verts with vertices involved in violations
             result.failed_verts = find_violated_vertices(
                 &normalized, &result.tets, &result.adjacency, num_real,
             );
-            eprintln!("[DELAUNAY] Found {} violated vertices for star splaying", result.failed_verts.len());
-            // Use catch_unwind to prevent star splaying bugs from crashing
+            phase2::mark_sphere_fail_flags(&extended_points, &mut result, num_real);
             let mut splay_result = result.clone();
             let splay_points = extended_points.clone();
             let splay_ok = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -296,31 +294,13 @@ pub async fn delaunay_3d(
                 phase2::rebuild_adjacency(&mut splay_result);
                 splay_result
             }));
-            match splay_ok {
-                Ok(fixed) => {
-                    // Safety check: star splaying should not drastically reduce tet count.
-                    // If starsToTetra failed to reconstruct most tets, the result is unusable.
-                    let original_tet_count = result.tets.len();
-                    let fixed_tet_count = fixed.tets.len();
-                    if fixed_tet_count < original_tet_count / 2 {
-                        eprintln!("[DELAUNAY] Star splaying destroyed triangulation ({} -> {} tets), keeping original",
-                                  original_tet_count, fixed_tet_count);
-                        break;
-                    }
-                    let post_violations = check_delaunay_quality(
-                        &normalized, &fixed.tets, &fixed.adjacency, num_real,
-                    ).unwrap_or(remaining);
-                    if post_violations < remaining {
-                        eprintln!("[DELAUNAY] Star splaying reduced violations: {} -> {}", remaining, post_violations);
-                        result = fixed;
-                    } else {
-                        eprintln!("[DELAUNAY] Star splaying did not improve ({} -> {}), keeping original", remaining, post_violations);
-                        break;
-                    }
-                }
-                Err(_) => {
-                    eprintln!("[DELAUNAY] Star splaying panicked, keeping original result");
-                    break;
+            if let Ok(fixed) = splay_ok {
+                let post = check_delaunay_quality(
+                    &normalized, &fixed.tets, &fixed.adjacency, num_real,
+                ).unwrap_or(remaining);
+                if post < remaining {
+                    eprintln!("[DELAUNAY] Star splaying reduced violations: {} -> {}", remaining, post);
+                    result = fixed;
                 }
             }
         }

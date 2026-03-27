@@ -108,6 +108,14 @@ impl Star {
     /// - `vi`: Local index of the vertex to delete
     /// - `stack`: Work stack for recursive flipping
     pub fn flip31(&mut self, tri_idx: usize, vi: usize, stack: &mut Vec<u32>) {
+        // Guard: flip31 removes 2 triangles (3→1). Ensure at least 4 remain
+        // after the flip (minimum for a valid closed 2D manifold).
+        let active_count = self.tri_status_vec.iter()
+            .filter(|s| **s != TriStatus::Free).count();
+        if active_count < 6 {
+            return; // Would collapse star below valid manifold size
+        }
+
         let cor_vi = (vi + 1) % 3;
         let opp = self.tri_opp_vec[tri_idx];
         let tri = self.tri_vec[tri_idx];
@@ -332,12 +340,12 @@ impl Star {
 
     /// Perform local Delaunay flipping on link using flip-flop algorithm.
     ///
-    /// Ported from Star.cpp lines 191-288
+    /// Ported from Star.cpp:305-324 (flipping) + 191-288 (doFlipping)
     ///
-    /// **TODO:** Full implementation in progress - this is a simplified version
+    /// CUDA's flipping() iterates sphere-fail edges, calling doFlipping per edge
+    /// with a FRESH stack each time. Breaks inner vi loop after first successful
+    /// doFlipping (count > 1) per triangle.
     pub fn do_flipping(&mut self) {
-        let mut stack: Vec<u32> = Vec::new();
-        // Size to cover all vertex IDs that may appear in the star (including super-tet)
         let max_vert = self.tri_vec.iter()
             .flat_map(|t| t.v.iter())
             .copied()
@@ -347,23 +355,97 @@ impl Star {
         let mut is_non_extreme = vec![0i32; is_non_extreme_len];
         let visit_id = 1i32;
 
-        // Start with all edges
-        for tri_idx in 0..self.tri_vec.len() {
-            if self.tri_status_vec[tri_idx] == TriStatus::Free {
-                continue;
+        let mut stack: Vec<u32> = Vec::new();
+
+        // Check if any sphere-fail flags exist
+        let mut has_sphere_fail = false;
+        for idx in 0..self.tri_vec.len() {
+            if self.tri_status_vec[idx] == TriStatus::Free { continue; }
+            let opp = self.tri_opp_vec[idx];
+            for vi in 0..3usize {
+                if opp.is_opp_sphere_fail(vi) {
+                    has_sphere_fail = true;
+                    break;
+                }
             }
-            for vi in 0..3 {
-                stack.push(encode(tri_idx as u32, vi as u32));
-            }
+            if has_sphere_fail { break; }
         }
 
-        // Process stack
+        if has_sphere_fail {
+            // CUDA: Star.cpp:305-324 (flipping)
+            // Iterate triangles, call doFlipping per sphere-fail edge with fresh stack.
+            // Break inner loop after first successful doFlipping per triangle.
+            let tri_count = self.tri_vec.len();
+            for idx in 0..tri_count {
+                if idx >= self.tri_status_vec.len() { break; }
+                if self.tri_status_vec[idx] == TriStatus::Free { continue; }
+
+                let opp = self.tri_opp_vec[idx];
+
+                for vi in 0..3usize {
+                    if !opp.is_opp_sphere_fail(vi) { continue; }
+
+                    // CUDA: doFlipping clears stack at start, pushes just this one edge
+                    if self.do_flipping_from(idx, vi, &mut stack, &mut is_non_extreme, visit_id) {
+                        break; // Move to next triangle after successful flip cascade
+                    }
+                }
+            }
+        } else {
+            // Fallback: no sphere-fail flags (e.g. after CPU rebuilds).
+            // Seed with all edges in one pass.
+            stack.clear();
+            for idx in 0..self.tri_vec.len() {
+                if self.tri_status_vec[idx] == TriStatus::Free { continue; }
+                for vi in 0..3usize {
+                    stack.push(encode(idx as u32, vi as u32));
+                }
+            }
+            self.process_flip_stack(&mut stack, &mut is_non_extreme, visit_id);
+        }
+    }
+
+    /// Run doFlipping starting from a single edge.
+    ///
+    /// Ported from Star.cpp:191-288 (doFlipping).
+    /// Returns true if any work was done (count > 1).
+    fn do_flipping_from(
+        &mut self,
+        start_idx: usize,
+        start_vi: usize,
+        stack: &mut Vec<u32>,
+        is_non_extreme: &mut Vec<i32>,
+        visit_id: i32,
+    ) -> bool {
+        // CUDA: stack->clear(); stack->push_back(encode(startIdx, startVi));
+        stack.clear();
+        stack.push(encode(start_idx as u32, start_vi as u32));
+
+        let count = self.process_flip_stack(stack, is_non_extreme, visit_id);
+        count > 1
+    }
+
+    /// Process a flip stack until empty. Returns number of items processed.
+    fn process_flip_stack(
+        &mut self,
+        stack: &mut Vec<u32>,
+        is_non_extreme: &mut Vec<i32>,
+        visit_id: i32,
+    ) -> usize {
+        let max_iters = self.tri_vec.len() * 20;
+        let mut count = 0;
         while let Some(code) = stack.pop() {
+            count += 1;
+            if count > max_iters {
+                break;
+            }
             let (tri_idx, vi) = decode(code);
             let tri_idx = tri_idx as usize;
             let vi = vi as usize;
 
-            if self.tri_status_vec[tri_idx] == TriStatus::Free {
+            if tri_idx >= self.tri_status_vec.len()
+                || self.tri_status_vec[tri_idx] == TriStatus::Free
+            {
                 continue;
             }
 
@@ -388,11 +470,16 @@ impl Star {
 
             // Find min labeled vertex in configuration
             let mut min_vert = u32::MAX;
-            if is_non_extreme[opp_vert as usize] == visit_id {
+            if (opp_vert as usize) < is_non_extreme.len()
+                && is_non_extreme[opp_vert as usize] == visit_id
+            {
                 min_vert = opp_vert;
             }
             for i in 0..3 {
-                if tri.v[i] < min_vert && is_non_extreme[tri.v[i] as usize] == visit_id {
+                if (tri.v[i] as usize) < is_non_extreme.len()
+                    && tri.v[i] < min_vert
+                    && is_non_extreme[tri.v[i] as usize] == visit_id
+                {
                     min_vert = tri.v[i];
                 }
             }
@@ -420,10 +507,7 @@ impl Star {
                 continue;
             }
 
-            // Check for 3-1 flip possibility.
-            // flip31 accesses: opp.t[vi], opp.t[(vi+1)%3], opp.t[(vi+2)%3],
-            //   tri_opp_vec[opp_tri].t[(opp_vi+1)%3], tri_opp_vec[side_tri].t[(side_vi+2)%3]
-            // All must be valid (not INVALID/boundary).
+            // Check for 3-1 flip possibility
             {
                 let all_valid = opp.t[(vi + 1) % 3] != crate::types::INVALID
                     && opp.t[(vi + 2) % 3] != crate::types::INVALID
@@ -440,7 +524,7 @@ impl Star {
                         && opp.get_opp_tri((vi + 1) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 2) % 3)
                     {
                         if ort < 0 || min_vert == tri.v[(vi + 2) % 3] {
-                            self.flip31(tri_idx, vi, &mut stack);
+                            self.flip31(tri_idx, vi, stack);
                         }
                         continue;
                     }
@@ -454,16 +538,14 @@ impl Star {
                         && opp.get_opp_tri((vi + 2) % 3) == self.tri_opp_vec[opp_tri].get_opp_tri((opp_vi + 1) % 3)
                     {
                         if ort < 0 || min_vert == tri.v[(vi + 1) % 3] {
-                            self.flip31(tri_idx, (vi + 2) % 3, &mut stack);
+                            self.flip31(tri_idx, (vi + 2) % 3, stack);
                         }
                         continue;
                     }
                 }
             }
 
-            // Check all surrounding edges are valid before attempting any flip.
-            // Stars may have boundary (INVALID adjacency) when the GPU output is
-            // incomplete. CUDA assumes closed manifolds; we must guard against open ones.
+            // Check all surrounding edges are valid before attempting any flip
             if opp.t[(vi + 1) % 3] == crate::types::INVALID
                 || opp.t[(vi + 2) % 3] == crate::types::INVALID
                 || self.tri_opp_vec[opp_tri].t[(opp_vi + 1) % 3] == crate::types::INVALID
@@ -472,48 +554,55 @@ impl Star {
                 continue;
             }
 
-            // Check 2-2 flippability using orient3d
-            // CUDA: OrientNeg == doOrient3DSoS(...) means Shewchuk orient3d > 0
-            // (ortToOrient inverts: det > 0 → OrientNeg)
-            // So "can't flip" when Shewchuk orient3d > 0.
-            let or1 = predicates::orient3d(
+            // Check 2-2 flippability using orient3d_sos
+            let or1 = predicates::orient3d_sos(
                 self.points[tri.v[vi] as usize],
                 self.points[tri.v[(vi + 1) % 3] as usize],
                 self.points[opp_vert as usize],
                 self.points[self.vert as usize],
+                tri.v[vi], tri.v[(vi + 1) % 3], opp_vert, self.vert,
             );
 
-            if or1 > 0.0 {
-                if ort < 0 && is_non_extreme[tri.v[(vi + 1) % 3] as usize] != visit_id {
+            if or1 == -1 {
+                if ort < 0
+                    && (tri.v[(vi + 1) % 3] as usize) < is_non_extreme.len()
+                    && is_non_extreme[tri.v[(vi + 1) % 3] as usize] != visit_id
+                {
                     is_non_extreme[tri.v[(vi + 1) % 3] as usize] = visit_id;
-                    self.push_fan_to_stack(tri_idx, (vi + 2) % 3, &mut stack);
+                    self.push_fan_to_stack(tri_idx, (vi + 2) % 3, stack);
                 }
                 continue;
             }
 
-            let or2 = predicates::orient3d(
+            let or2 = predicates::orient3d_sos(
                 self.points[tri.v[(vi + 2) % 3] as usize],
                 self.points[tri.v[vi] as usize],
                 self.points[opp_vert as usize],
                 self.points[self.vert as usize],
+                tri.v[(vi + 2) % 3], tri.v[vi], opp_vert, self.vert,
             );
 
-            if or2 > 0.0 {
-                if ort < 0 && is_non_extreme[tri.v[(vi + 2) % 3] as usize] != visit_id {
+            if or2 == -1 {
+                if ort < 0
+                    && (tri.v[(vi + 2) % 3] as usize) < is_non_extreme.len()
+                    && is_non_extreme[tri.v[(vi + 2) % 3] as usize] != visit_id
+                {
                     is_non_extreme[tri.v[(vi + 2) % 3] as usize] = visit_id;
-                    self.push_fan_to_stack(tri_idx, vi, &mut stack);
+                    self.push_fan_to_stack(tri_idx, vi, stack);
                 }
                 continue;
             }
 
             // Perform 2-2 flip
-            self.flip22(tri_idx, vi, &mut stack);
+            self.flip22(tri_idx, vi, stack);
         }
+        count
     }
 
     /// Push fan of edges around vertex to stack.
     ///
-    /// Ported from Star.cpp (helper for doFlipping)
+    /// Ported from Star.cpp:291-303 (pushFanToStack)
+    /// CUDA traverses through face `vi` (not `(vi+1)%3`).
     fn push_fan_to_stack(&self, start_tri_idx: usize, start_vi: usize, stack: &mut Vec<u32>) {
         let mut tri_idx = start_tri_idx;
         let mut vi = start_vi;
@@ -522,12 +611,12 @@ impl Star {
             stack.push(encode(tri_idx as u32, vi as u32));
 
             let opp = self.tri_opp_vec[tri_idx];
-            // Check for boundary (INVALID adjacency = star boundary)
-            if opp.t[(vi + 1) % 3] == crate::types::INVALID {
+            // CUDA: triIdx = opp.getOppTri(vi), vi = (opp.getOppVi(vi) + 2) % 3
+            if opp.t[vi] == crate::types::INVALID {
                 break;
             }
-            let next_tri = opp.get_opp_tri((vi + 1) % 3) as usize;
-            let next_vi = opp.get_opp_vi((vi + 1) % 3) as usize;
+            let next_tri = opp.get_opp_tri(vi) as usize;
+            let next_vi = opp.get_opp_vi(vi) as usize;
 
             if next_tri == start_tri_idx {
                 break;
@@ -582,14 +671,18 @@ impl Star {
                     continue; // Skip incoming direction
                 }
 
-                let ori = predicates::orient3d(
+                // orient3d_sos returns ortToOrient(det):
+                //   +1 = OrientPos, -1 = OrientNeg
+                // CUDA (Star.cpp:791): breaks on OrientNeg == ori
+                let ori = predicates::orient3d_sos(
                     self.points[tri.v[(vi + 1) % 3] as usize],
                     self.points[tri.v[(vi + 2) % 3] as usize],
                     self.points[in_vert as usize],
                     self.points[self.vert as usize],
+                    tri.v[(vi + 1) % 3], tri.v[(vi + 2) % 3], in_vert, self.vert,
                 );
 
-                if ori < 0.0 {
+                if ori < 0 {
                     break;
                 }
                 vi += 1;
@@ -616,7 +709,8 @@ impl Star {
         }
 
         // Fallback: linear scan of all non-free triangles.
-        // Test each triangle to see if in_vert is "inside" (all orient3d >= 0).
+        // CUDA (Star.cpp:795): containing triangle has vi >= 3 (no OrientNeg break).
+        // I.e., all orient3d_sos results are NOT OrientNeg (all >= 0, i.e. OrientPos).
         for ti in 0..self.tri_vec.len() {
             if self.tri_status_vec[ti] == TriStatus::Free {
                 continue;
@@ -624,13 +718,14 @@ impl Star {
             let tri = self.tri_vec[ti];
             let mut inside = true;
             for vi in 0..3 {
-                let ori = predicates::orient3d(
+                let ori = predicates::orient3d_sos(
                     self.points[tri.v[(vi + 1) % 3] as usize],
                     self.points[tri.v[(vi + 2) % 3] as usize],
                     self.points[in_vert as usize],
                     self.points[self.vert as usize],
+                    tri.v[(vi + 1) % 3], tri.v[(vi + 2) % 3], in_vert, self.vert,
                 );
-                if ori < 0.0 {
+                if ori < 0 {
                     inside = false;
                     break;
                 }
@@ -978,6 +1073,12 @@ impl Star {
             return true;
         }
 
+        // Ensure visited is large enough for all triangle indices
+        let needed = self.tri_vec.len() + 64; // extra room for growth during stitch
+        if visited.len() < needed {
+            visited.resize(needed, 0);
+        }
+
         // Save state: mark_beneath_triangles destructively sets triangles to Free.
         // If stitch_vert_to_hole then fails, the star is corrupted.
         // We must restore to prevent cascade failures.
@@ -990,6 +1091,15 @@ impl Star {
                 // Restore: mark_beneath may have partially marked Free
                 self.tri_status_vec = saved_status;
                 self.tet_idx_vec = saved_tet_idx;
+                // Check if locate_vert can find the vertex at all
+                static INSERT_FAIL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+                let count = INSERT_FAIL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                if count < 10 {
+                    let loc = self.locate_vert(ins_vert);
+                    eprintln!("[INSERT-FAIL] Star {} insert {} failed: mark_beneath=None, locate={:?}, tris={}",
+                        self.vert, ins_vert, loc, self.tri_vec.iter().zip(self.tri_status_vec.iter())
+                            .filter(|(_, s)| **s != TriStatus::Free).count());
+                }
                 return false;
             }
         };
@@ -998,6 +1108,12 @@ impl Star {
             // Restore: stitch failed, star has corrupted state
             self.tri_status_vec = saved_status;
             self.tet_idx_vec = saved_tet_idx;
+            static STITCH_FAIL_COUNT: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+            let count = STITCH_FAIL_COUNT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            if count < 5 {
+                eprintln!("[STITCH-FAIL] Star {} insert {} failed: stitch_vert_to_hole returned false, ben_tri={}",
+                    self.vert, ins_vert, ben_tri_idx);
+            }
             return false;
         }
         true

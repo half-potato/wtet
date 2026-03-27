@@ -72,6 +72,9 @@ pub fn fix_with_star_splaying(points: &[[f32; 3]], result: &mut DelaunayResult) 
     eprintln!("\n[SPLAY] PHASE 2: Work Queue Processing");
     ctx.process_queue(result);
 
+    // Diagnostic: check star consistency (matches CUDA's checkStarConsistency)
+    ctx.check_star_consistency();
+
     // Phase 3: Reintegrate stars back to tetrahedra
     eprintln!("\n[SPLAY] PHASE 3: Reintegration");
     ctx.stars_to_tetra(result);
@@ -268,6 +271,34 @@ impl SplayingContext {
         Some(star)
     }
 
+    /// Seed the work queue with ALL triangle facets from a star.
+    ///
+    /// Unlike compare_star_add_queue (which only adds tet_idx==-1 triangles),
+    /// this adds facets for ALL alive triangles. Used when do_flipping is
+    /// skipped to ensure process_queue can create neighbor stars.
+    fn seed_all_facets_to_queue(&mut self, star_idx: usize) {
+        let vert = self.stars[star_idx].vert;
+
+        for tri_idx in 0..self.stars[star_idx].tri_vec.len() {
+            if self.stars[star_idx].tri_status_vec[tri_idx] == TriStatus::Free {
+                continue;
+            }
+
+            let tri = self.stars[star_idx].tri_vec[tri_idx];
+
+            for vi in 0..3 {
+                let facet = Facet {
+                    from: vert,
+                    from_idx: tri_idx as u32,
+                    to: tri.v[vi],
+                    v0: tri.v[(vi + 1) % 3],
+                    v1: tri.v[(vi + 2) % 3],
+                };
+                self.facet_queue.push(facet);
+            }
+        }
+    }
+
     /// Add new link triangles to the work queue for consistency checking.
     ///
     /// Ported from Splaying.cpp lines 264-292 (compareStarAddQueue)
@@ -324,21 +355,37 @@ impl SplayingContext {
                 star.tri_vec.len()
             );
 
-            // Perform initial flipping on star
-            // CUDA: Star.cpp:305-324 — flipping() checks OPP_SPHERE_FAIL
+            // CUDA: flipping() does local Delaunay flips on sphere-fail edges.
+            // flip31 is guarded to prevent collapsing stars below 4 active triangles.
             star.do_flipping();
 
             // Add to star list
             let star_idx = self.stars.len();
             self.stars.push(star);
 
-            // CUDA: Splaying.cpp:248 — compareStarAddQueue(star)
-            // Add all NEW link triangles (tetIdxVec == -1) to the work queue.
-            // This is CRITICAL: without it, process_queue has no work items
-            // and neighbor stars are never created for consistency.
-            self.compare_star_add_queue(star_idx);
+            // Seed queue with ALL triangle facets. This ensures neighbor stars
+            // get created for consistency, even for original (unflipped) triangles.
+            // CUDA only seeds tet_idx==-1 (new) triangles via compareStarAddQueue,
+            // but seeding all is more robust when some stars have boundary issues.
+            self.seed_all_facets_to_queue(star_idx);
         }
 
+        // Diagnostic: count INVALID boundary faces across all stars
+        let mut total_faces = 0;
+        let mut invalid_faces = 0;
+        for star in &self.stars {
+            for tri_idx in 0..star.tri_vec.len() {
+                if star.tri_status_vec[tri_idx] == TriStatus::Free { continue; }
+                for vi in 0..3 {
+                    total_faces += 1;
+                    if star.tri_opp_vec[tri_idx].t[vi] == INVALID {
+                        invalid_faces += 1;
+                    }
+                }
+            }
+        }
+        eprintln!("[SPLAY] Star faces: {} total, {} INVALID boundary ({:.1}%)",
+                  total_faces, invalid_faces, 100.0 * invalid_faces as f64 / total_faces.max(1) as f64);
         eprintln!("[SPLAY] Extracted {} stars total", self.stars.len());
         eprintln!("[SPLAY] Initial facet queue size: {}", self.facet_queue.len());
     }
@@ -507,6 +554,70 @@ impl SplayingContext {
         );
     }
 
+    /// Check star consistency after process_queue.
+    ///
+    /// Ported from Splaying.cpp lines 441-483 (checkStarConsistency).
+    /// For every link triangle in every star, check that the corresponding
+    /// tet exists in all 3 neighbor stars.
+    fn check_star_consistency(&self) {
+        let mut star_map: std::collections::HashMap<u32, usize> = std::collections::HashMap::new();
+        for (idx, star) in self.stars.iter().enumerate() {
+            star_map.insert(star.vert, idx);
+        }
+
+        let mut missing_star = 0;
+        let mut missing_tri = 0;
+        let mut total_checked = 0;
+
+        for (star_idx, star) in self.stars.iter().enumerate() {
+            let from_vert = star.vert;
+
+            for tri_idx in 0..star.tri_vec.len() {
+                if star.tri_status_vec[tri_idx] == TriStatus::Free {
+                    continue;
+                }
+
+                let tri = star.tri_vec[tri_idx];
+                // Tet = {tri.v[0], tri.v[1], tri.v[2], from_vert}
+                // Check in 3 other stars (one per tri vertex)
+                for vi in 0..3 {
+                    let to_vert = tri.v[vi];
+                    total_checked += 1;
+
+                    let to_star_idx = match star_map.get(&to_vert) {
+                        Some(&idx) => idx,
+                        None => {
+                            missing_star += 1;
+                            continue;
+                        }
+                    };
+
+                    // Build the link triangle as seen from to_vert's star
+                    let to_tri = crate::cpu::facet::Tri::new(
+                        from_vert,
+                        tri.v[(vi + 1) % 3],
+                        tri.v[(vi + 2) % 3],
+                    );
+
+                    if self.stars[to_star_idx].get_link_tri_idx(&to_tri).is_none() {
+                        missing_tri += 1;
+                        if missing_tri <= 5 {
+                            eprintln!(
+                                "[CONSIST] Triangle not found in star {}: ({}, {}, {}) <--- star {}",
+                                to_vert, to_tri.v[0], to_tri.v[1], to_tri.v[2], from_vert
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        eprintln!(
+            "[CONSIST] Star consistency: {} checks, {} missing stars, {} missing triangles",
+            total_checked, missing_star, missing_tri
+        );
+    }
+
     /// Convert all stars back to tetrahedra.
     ///
     /// Ported from Splaying.cpp lines 485-615 (starsToTetra)
@@ -592,11 +703,8 @@ impl SplayingContext {
                     result.adjacency.push([INVALID; 4]);
                     new_tet_count += 1;
                 } else {
-                    // Tet was found in another star. Update its vertex data
-                    // (in case it was a recycled dead tet with old data).
-                    result.tets[tet_idx as usize] = [tri.v[0], tri.v[1], tri.v[2], vert];
-                    result.adjacency[tet_idx as usize] = [INVALID; 4];
-                    // This tet is alive now
+                    // CUDA: never overwrites tet data. The first star to create the tet
+                    // determines vertex ordering. Just revive the tet.
                     self.dead_tets.remove(&(tet_idx as usize));
                 }
 
